@@ -92,22 +92,22 @@ def load_history(gw=1):
 
 
 def load_my_picks(gw=1):
-    """Load my 15 picks in position order (snapshot first, then cwd)."""
+    """Load my 15 picks in position order from snapshots/gw{N}/my_team.json."""
     folder = snapshot_dir(gw)
-    for path in (folder / "my_team.json", Path("my_team.json")):
-        if path.exists():
-            data = _read_json(path)
-            if data.get("picks"):
-                return sorted(data["picks"], key=lambda p: p["position"])
-    raise FileNotFoundError("No my_team.json with picks[] found")
+    path = folder / "my_team.json"
+    if path.exists():
+        data = _read_json(path)
+        if data.get("picks"):
+            return sorted(data["picks"], key=lambda p: p["position"])
+    raise FileNotFoundError(f"No {path} with picks[] found")
 
 
 def load_my_bank(gw=1):
-    """Bank balance (£0.1m units) from my_team.json transfers.bank."""
+    """Bank balance (£0.1m units) from snapshots/gw{N}/my_team.json transfers.bank."""
     folder = snapshot_dir(gw)
-    for path in (folder / "my_team.json", Path("my_team.json")):
-        if path.exists():
-            data = _read_json(path)
-            transfers = data.get("transfers") or {}
-            return int(transfers.get("bank") or 0)
+    path = folder / "my_team.json"
+    if path.exists():
+        data = _read_json(path)
+        transfers = data.get("transfers") or {}
+        return int(transfers.get("bank") or 0)
     return 0

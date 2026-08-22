@@ -1,11 +1,13 @@
 """Fetch each player's past-season totals and save snapshots/gw1/history_past.json."""
 
+import _bootstrap  # noqa: F401
+
 import json
 import time
 
 import requests
 
-from fpl_data import load_snapshot, snapshot_dir
+from fpl_agent.data import load_snapshot, snapshot_dir
 
 SUMMARY_URL = "https://fantasy.premierleague.com/api/element-summary/{id}/"
 SLEEP_S = 0.5

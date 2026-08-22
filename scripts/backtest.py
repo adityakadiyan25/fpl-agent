@@ -5,15 +5,17 @@ carryover. Each GW we pick a fresh legal 15 + XI from the full pool
 at £100m, as if every week were a free-hit.
 """
 
+import _bootstrap  # noqa: F401
+
 import csv
 from collections import defaultdict
 from pathlib import Path
 
 import requests
 
-from fpl_data import POSITION_LABELS
-from fpl_optimize import MIN_IN_XI, MAX_IN_XI, best_squad, best_xi
-from fpl_projections import (
+from fpl_agent.data import POSITION_LABELS
+from fpl_agent.optimize import MIN_IN_XI, MAX_IN_XI, best_squad, best_xi
+from fpl_agent.projections import (
     _crowd_play_prob,
     _ep_from_rates,
     expected_minutes_v2_from_apps,

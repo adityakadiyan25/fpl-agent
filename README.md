@@ -1,0 +1,85 @@
+# FPL Agent
+
+A Fantasy Premier League toolkit built around **frozen gameweek snapshots**, expected-points models, an integer-programming squad optimizer, and a Claude-powered assistant grounded in tool outputs.
+
+Run everything from the **repository root** (paths are relative to cwd).
+
+## Architecture
+
+| Layer | Module | Role |
+|-------|--------|------|
+| **L1 Data** | `fpl_agent/data.py` | Snapshots, bootstrap, fixtures, picks, history |
+| **L2 Projections** | `fpl_agent/projections.py` | Expected-points models (v0–v2, v3a) |
+| **L3 Optimize** | `fpl_agent/optimize.py` | Legal 15, best XI, captain, transfer suggestions |
+| **L4 Tools** | `fpl_agent/tools.py` | Agent-facing tool API over snapshots + models |
+| **L5 Agent** | `fpl_agent/agent.py` | Claude tool loop (`main.py agent`) |
+| **Scripts** | `scripts/` | One-off rituals (snapshot, freeze, grade, backtest, diagnose) |
+
+## Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+# Add ANTHROPIC_API_KEY to .env for the agent
+```
+
+## Workflow
+
+### 1. Snapshot (freeze the world)
+
+```bash
+python3 scripts/snapshot.py --gw 1
+```
+
+GW1 requires `snapshots/gw1/my_team.json` already in place. Refuses to overwrite an existing bootstrap unless `--force`.
+
+### 2. History (optional, for v1+ models)
+
+```bash
+python3 scripts/fetch_history.py
+```
+
+### 3. Shadow envelope (pre-register optimal squad)
+
+```bash
+python3 scripts/freeze_shadow.py --gw 1
+```
+
+Write-once: refuses if `shadow_team.json` already exists.
+
+### 4. CLI tools
+
+```bash
+python3 main.py compare
+python3 main.py report --model v2
+python3 main.py optimize --model v2
+python3 main.py transfer --model v2
+```
+
+### 5. Agent
+
+```bash
+python3 main.py agent "Should I transfer Mosquera?"
+```
+
+Requires `ANTHROPIC_API_KEY` in `.env` or the environment. Traces go to `traces/`.
+
+### 6. Grade & diagnose
+
+```bash
+python3 scripts/grade_gw1.py
+python3 scripts/diagnose.py
+python3 scripts/backtest.py
+```
+
+## Results
+
+Predictions and shadow envelopes are **pre-registered** in git (`snapshots/gwN/prediction.json`, `shadow_team.json`) — timestamps in commit history serve as the registration record.
+
+| Metric | GW1 | Season |
+|--------|-----|--------|
+| Projected score (v2) | TBD | — |
+| Actual score | TBD | TBD |
+| Shadow vs actual | TBD | TBD |
+| Model backtest (diagnose headline) | — | TBD |

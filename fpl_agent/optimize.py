@@ -4,7 +4,7 @@ import heapq
 
 import pulp
 
-from fpl_data import POSITION_LABELS
+from fpl_agent.data import POSITION_LABELS
 
 # FPL starting-XI formation bounds (1 GK + 10 outfield)
 MIN_IN_XI = {1: 1, 2: 3, 3: 2, 4: 1}

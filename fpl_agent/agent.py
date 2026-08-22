@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fpl_tools import TOOLS, dispatch
+from fpl_agent.tools import TOOLS, dispatch
 
 MODEL = "claude-sonnet-4-6"
 MAX_TURNS = 8
@@ -16,7 +16,10 @@ SYSTEM = (
     "Every numeric claim must come from a tool result — if you didn't call a "
     "tool for it, say so. State dates, times and weekdays only as returned by "
     "tools — never compute calendar facts yourself. Recommendations end with a "
-    "one-line WHY citing numbers."
+    "one-line WHY citing numbers. "
+    "If audit_squad (or any tool) returns deadline_passed true, open by stating "
+    "that this gameweek is locked and frame all advice toward the next deadline "
+    "returned as next_deadline."
 )
 
 

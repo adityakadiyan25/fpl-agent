@@ -1,6 +1,8 @@
 """Grade frozen GW1 ep_next predictions against live FPL points."""
 
-from fpl_data import (
+import _bootstrap  # noqa: F401
+
+from fpl_agent.data import (
     build_players,
     fetch_entry_picks,
     fetch_live_bootstrap,

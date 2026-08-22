@@ -2,7 +2,8 @@
 
 import argparse
 
-from fpl_data import (
+from fpl_agent.agent import run as agent_run
+from fpl_agent.data import (
     POSITION_LABELS,
     build_players,
     load_history,
@@ -10,8 +11,8 @@ from fpl_data import (
     load_my_picks,
     load_snapshot,
 )
-from fpl_optimize import best_squad, best_xi, suggest_transfer
-from fpl_projections import expected_minutes, per_90_rates, project
+from fpl_agent.optimize import best_squad, best_xi, suggest_transfer
+from fpl_agent.projections import expected_minutes, per_90_rates, project
 
 MODELS = ("v0", "v1", "v2")
 
@@ -221,6 +222,11 @@ def cmd_transfer(args):
         print()
 
 
+def cmd_agent(args):
+    """Ask the FPL assistant (Claude + tools)."""
+    agent_run(" ".join(args.question))
+
+
 def main():
     parser = argparse.ArgumentParser(description="FPL expected-points tools")
     parser.add_argument("--gw", type=int, default=1, help="snapshot gameweek (default 1)")
@@ -263,6 +269,10 @@ def main():
         help="min net points vs hold to recommend a transfer (default 1.0)",
     )
     xfer.set_defaults(func=cmd_transfer)
+
+    agent = sub.add_parser("agent", help="ask the FPL assistant")
+    agent.add_argument("question", nargs="+", help="your question")
+    agent.set_defaults(func=cmd_agent)
 
     args = parser.parse_args()
     args.func(args)

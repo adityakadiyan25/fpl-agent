@@ -1,5 +1,7 @@
 """Build per-GW actuals JSON from cached vaastav merged_gw.csv."""
 
+import _bootstrap  # noqa: F401
+
 import argparse
 import json
 import re
@@ -8,7 +10,7 @@ from pathlib import Path
 
 from backtest import SEASON, cache_csv, index_merged, load_csv, sum_rows, unique_fixture_rows
 from backtest import _to_int
-from fpl_data import load_snapshot
+from fpl_agent.data import load_snapshot
 
 OUT_DIR = Path("data/season")
 PER_GW_PATH = OUT_DIR / "per_gw_2025-26.json"

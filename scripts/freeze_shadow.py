@@ -1,14 +1,16 @@
 """Freeze an optimal shadow squad envelope for a gameweek (write once)."""
 
+import _bootstrap  # noqa: F401
+
 import argparse
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fpl_data import POSITION_LABELS, build_players, load_history, load_snapshot
-from fpl_optimize import best_squad, best_xi
-from fpl_projections import project
+from fpl_agent.data import POSITION_LABELS, build_players, load_history, load_snapshot
+from fpl_agent.optimize import best_squad, best_xi
+from fpl_agent.projections import project
 
 MODELS = ("v0", "v1", "v2")
 MAX_LOW_CONFIDENCE = 2

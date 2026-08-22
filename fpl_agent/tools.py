@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from fpl_data import (
+from fpl_agent.data import (
     POSITION_LABELS,
     build_players,
     load_history,
@@ -11,8 +11,8 @@ from fpl_data import (
     load_my_picks,
     load_snapshot,
 )
-from fpl_optimize import ATTACKERS, best_squad, best_xi, suggest_transfer
-from fpl_projections import expected_minutes, per_90_rates, project
+from fpl_agent.optimize import ATTACKERS, best_squad, best_xi, suggest_transfer
+from fpl_agent.projections import expected_minutes, per_90_rates, project
 
 MODELS = ("v0", "v1", "v2")
 GW = 1
@@ -209,17 +209,15 @@ def _pack_ids(ids, players, proj, captain=None):
     return rows
 
 
-def _deadline(bootstrap):
-    events = bootstrap.get("events") or []
-    nxt = next((e for e in events if e.get("is_next")), None)
-    cur = next((e for e in events if e.get("is_current")), None)
-    ev = nxt or cur or next((e for e in events if e.get("id") == 1), None)
-    if not ev:
-        return None
+def _parse_deadline(iso):
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def _format_deadline(ev):
     iso = ev.get("deadline_time")
     if not iso:
         return {"event": ev.get("id"), "utc": None, "ist": None, "weekday": None}
-    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    dt = _parse_deadline(iso)
     ist_dt = dt.astimezone(IST)
     return {
         "event": ev.get("id"),
@@ -227,6 +225,34 @@ def _deadline(bootstrap):
         "ist": f"{ist_dt.strftime('%a')} {ist_dt.day} {ist_dt.strftime('%b')}, {ist_dt.strftime('%I:%M %p')}",
         "weekday": ist_dt.strftime("%A"),
     }
+
+
+def _deadline_status(bootstrap):
+    """Compare now (UTC) to transfer deadline; find earliest future deadline."""
+    now = datetime.now(timezone.utc)
+    events = bootstrap.get("events") or []
+
+    dated = []
+    for ev in events:
+        iso = ev.get("deadline_time")
+        if not iso:
+            continue
+        dated.append((_parse_deadline(iso), ev))
+    dated.sort(key=lambda pair: pair[0])
+
+    next_ev = next((ev for dt, ev in dated if dt > now), None)
+    next_deadline = _format_deadline(next_ev) if next_ev else None
+
+    transfer_ev = next((e for e in events if e.get("is_next")), None)
+    if transfer_ev is None:
+        transfer_ev = next((e for e in events if e.get("is_current")), None)
+
+    if transfer_ev and transfer_ev.get("deadline_time"):
+        deadline_passed = now >= _parse_deadline(transfer_ev["deadline_time"])
+    else:
+        deadline_passed = next_deadline is None
+
+    return deadline_passed, next_deadline
 
 
 def get_my_squad():
@@ -308,7 +334,7 @@ def audit_squad():
     snap, players, history, picks = _ctx()
     proj = project(players, history, snap["fixtures"], "v2")
     warnings = []
-    deadline = _deadline(snap["bootstrap"])
+    deadline_passed, next_deadline = _deadline_status(snap["bootstrap"])
 
     captain = next((pk for pk in picks if pk.get("is_captain")), None)
     if captain:
@@ -366,7 +392,8 @@ def audit_squad():
 
     return {
         "gw": snap["gw"],
-        "deadline": deadline,
+        "deadline_passed": deadline_passed,
+        "next_deadline": next_deadline,
         "warnings": warnings,
         "ok": not warnings,
     }

@@ -1,13 +1,13 @@
 """Save a frozen GW snapshot: bootstrap-static + fixtures from the FPL API."""
 
+import _bootstrap  # noqa: F401
+
 import argparse
 import json
-import shutil
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
-from fpl_data import fetch_fixtures, fetch_live_bootstrap, snapshot_dir
+from fpl_agent.data import fetch_fixtures, fetch_live_bootstrap, snapshot_dir
 
 PREDICTION_GW1 = {
     "gameweek": 1,
@@ -58,13 +58,14 @@ def main():
         saved.append(dest)
 
     if args.gw == 1:
-        team_src = Path("my_team.json")
-        if not team_src.exists():
-            print(f"GW1 snapshot requires {team_src} in the working directory.", file=sys.stderr)
+        team_path = out_dir / "my_team.json"
+        if not team_path.exists():
+            print(
+                f"GW1 snapshot requires {team_path} (export your team there first).",
+                file=sys.stderr,
+            )
             sys.exit(1)
-        team_dest = out_dir / "my_team.json"
-        shutil.copy2(team_src, team_dest)
-        saved.append(team_dest)
+        saved.append(team_path)
 
         prediction = {
             **PREDICTION_GW1,

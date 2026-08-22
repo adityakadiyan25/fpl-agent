@@ -4,6 +4,8 @@ Reuses backtest.py replay (cached CSVs, pre-GW features). Does not impute
 missing history as zero — those player-GWs are skipped and counted.
 """
 
+import _bootstrap  # noqa: F401
+
 from collections import defaultdict
 
 from backtest import (
@@ -14,7 +16,7 @@ from backtest import (
     load_replay,
     rolling_totals,
 )
-from fpl_data import POSITION_LABELS
+from fpl_agent.data import POSITION_LABELS
 
 MODELS = ("naive", "v1", "v2", "v3a", "crowd")
 HEADLINE_MODELS = ("naive", "v1", "v2", "v3a")
