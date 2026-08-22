@@ -4,3 +4,4 @@ __pycache__/
 entry_summary.json
 .env # never commit the key
 traces/
+.env
