@@ -18,11 +18,24 @@ from backtest import (
     rolling_totals,
 )
 from fpl_agent.data import POSITION_LABELS
+from fpl_agent.metrics import (
+    bias,
+    fmt_metric,
+    gw_metrics,
+    mae,
+    mean_metric,
+    p_at_11,
+    rankdata,
+    rmse,
+    spearman,
+)
 
 SCORE_MODELS = ("naive", "v1", "v2", "v3a", "v3b")
 MODELS = SCORE_MODELS + ("crowd",)
 INTERSECTION_MODELS = SCORE_MODELS
 HEADLINE_GW = (20, 38)
+PER_GW_AVG_KEYS = ("spearman", "p_at_11", "haul_recall", "captain_regret", "xi_regret")
+H2H_METRICS = ("mae", "rmse", "spearman", "p_at_11", "haul_recall", "captain_regret", "xi_regret")
 PRICE_BANDS = (
     ("<£5.0", lambda p: p < 5.0),
     ("£5.0–7.5", lambda p: 5.0 <= p < 7.5),
@@ -41,65 +54,6 @@ def naive_proj(gw, prior, form):
     if form["n_played"] <= 0:
         return None
     return form["points"] / form["n_played"]
-
-
-def rankdata(values):
-    """Average ranks, 1 = smallest value. Ties share the mean rank."""
-    n = len(values)
-    order = sorted(range(n), key=lambda i: values[i])
-    ranks = [0.0] * n
-    i = 0
-    while i < n:
-        j = i
-        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
-            j += 1
-        avg = (i + j) / 2.0 + 1.0
-        for k in range(i, j + 1):
-            ranks[order[k]] = avg
-        i = j + 1
-    return ranks
-
-
-def pearson(xs, ys):
-    n = len(xs)
-    if n < 2:
-        return None
-    mx = sum(xs) / n
-    my = sum(ys) / n
-    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    dx = sum((x - mx) ** 2 for x in xs) ** 0.5
-    dy = sum((y - my) ** 2 for y in ys) ** 0.5
-    if dx == 0 or dy == 0:
-        return None
-    return num / (dx * dy)
-
-
-def spearman(pred, actual):
-    """Higher pred and higher actual should correlate (we invert pred ranks)."""
-    return pearson(rankdata([-p for p in pred]), rankdata([-a for a in actual]))
-
-
-def precision_at_11(pred, actual, pids):
-    k = min(11, len(pred))
-    if k == 0:
-        return None
-    top_pred = {pid for pid, _ in sorted(zip(pids, pred), key=lambda t: (-t[1], t[0]))[:k]}
-    top_act = {pid for pid, _ in sorted(zip(pids, actual), key=lambda t: (-t[1], t[0]))[:k]}
-    return len(top_pred & top_act) / k
-
-
-def mae_bias(errors):
-    if not errors:
-        return None, None
-    n = len(errors)
-    return sum(abs(e) for e in errors) / n, sum(errors) / n
-
-
-def price_band(price):
-    for label, fn in PRICE_BANDS:
-        if fn(price):
-            return label
-    return PRICE_BANDS[-1][0]
 
 
 def collect_rows(replay):
@@ -161,6 +115,7 @@ def collect_rows(replay):
                     "pid": pid,
                     "name": web_name_of.get(pid) or b["name"],
                     "etype": etype,
+                    "team": b["team"],
                     "price": b["value"] / 10.0,
                     "minutes": b["minutes"],
                     "actual": b["points"],
@@ -184,10 +139,6 @@ def scored(rows, model):
     return [r for r in rows if r["pred"][model] is not None]
 
 
-def point_errors(rows, model):
-    return [r["actual"] - r["pred"][model] for r in rows]
-
-
 def rank_errors(rows, model):
     """Per-GW: error = actual_rank - pred_rank (1 = best). Positive = crowd overrated."""
     by_gw = defaultdict(list)
@@ -206,45 +157,6 @@ def rank_errors(rows, model):
     return errors
 
 
-def gw_spearman(rows, model):
-    by_gw = defaultdict(list)
-    for r in rows:
-        by_gw[r["gw"]].append(r)
-    vals = []
-    for gw_rows in by_gw.values():
-        if len(gw_rows) < 2:
-            continue
-        rho = spearman(
-            [r["pred"][model] for r in gw_rows],
-            [r["actual"] for r in gw_rows],
-        )
-        if rho is not None:
-            vals.append(rho)
-    return (sum(vals) / len(vals) if vals else None), len(vals)
-
-
-def gw_precision(rows, model):
-    by_gw = defaultdict(list)
-    for r in rows:
-        by_gw[r["gw"]].append(r)
-    vals = []
-    for gw_rows in by_gw.values():
-        p = precision_at_11(
-            [r["pred"][model] for r in gw_rows],
-            [r["actual"] for r in gw_rows],
-            [r["pid"] for r in gw_rows],
-        )
-        if p is not None:
-            vals.append(p)
-    return (sum(vals) / len(vals) if vals else None), len(vals)
-
-
-def fmt(val, nd=3):
-    if val is None:
-        return f"{'—':>8}"
-    return f"{val:>8.{nd}f}"
-
-
 def intersection_rows(rows, models, gw_range=None, played_only=False):
     lo, hi = gw_range or (2, 38)
     out = []
@@ -258,11 +170,59 @@ def intersection_rows(rows, models, gw_range=None, played_only=False):
     return out
 
 
-def model_metrics(rows, model):
-    mae, bias = mae_bias(point_errors(rows, model))
-    rho, _ = gw_spearman(rows, model)
-    p11, _ = gw_precision(rows, model)
-    return {"mae": mae, "bias": bias, "spearman": rho, "p11": p11}
+def _maps_from_rows(gw_rows, model):
+    projections = {
+        r["pid"]: r["pred"][model] for r in gw_rows if r["pred"].get(model) is not None
+    }
+    actuals = {r["pid"]: r["actual"] for r in gw_rows}
+    minutes = {r["pid"]: r["minutes"] for r in gw_rows}
+    players = {
+        r["pid"]: {
+            "element_type": r["etype"],
+            "team": r["team"],
+            "now_cost": int(round(r["price"] * 10)),
+            "can_select": True,
+        }
+        for r in gw_rows
+        if r["pid"] in projections
+    }
+    return projections, actuals, minutes, players
+
+
+def aggregate_model_metrics(rows, model, *, played_only=False):
+    """Pooled point metrics + per-GW averages for rank/optimizer metrics."""
+    subset = universe(rows, played_only) if played_only else rows
+    subset = scored(subset, model)
+    projections = {r["pid"]: r["pred"][model] for r in subset}
+    actuals = {r["pid"]: r["actual"] for r in subset}
+    minutes = {r["pid"]: r["minutes"] for r in subset}
+
+    out = {
+        "mae": mae(projections, actuals, minutes=minutes, played_only=played_only),
+        "bias": bias(projections, actuals, minutes=minutes, played_only=played_only),
+        "rmse": rmse(projections, actuals, minutes=minutes, played_only=played_only),
+    }
+
+    by_gw = defaultdict(list)
+    for r in subset:
+        by_gw[r["gw"]].append(r)
+
+    per_gw = {key: [] for key in PER_GW_AVG_KEYS}
+    for gw_rows in by_gw.values():
+        proj, act, mins, players = _maps_from_rows(gw_rows, model)
+        gm = gw_metrics(
+            proj,
+            act,
+            minutes=mins,
+            played_only=False,
+            players=players,
+        )
+        for key in PER_GW_AVG_KEYS:
+            per_gw[key].append(gm[key])
+
+    for key in PER_GW_AVG_KEYS:
+        out[key] = mean_metric(per_gw[key])
+    return out
 
 
 def print_intersection_table(title, rows, models, gw_range, played_only):
@@ -271,17 +231,118 @@ def print_intersection_table(title, rows, models, gw_range, played_only):
     filt = "mins>0" if played_only else "all fixtures"
     print(f"=== {title} (intersection, GW{lo}–{hi}, {filt}) ===")
     print(f"n={len(subset)} player-GWs where {', '.join(models)} all score")
-    hdr = f"{'model':<8} {'MAE':>8} {'bias':>8} {'Spearman':>8} {'P@11':>8}"
+    hdr = (
+        f"{'model':<8} {'MAE':>8} {'bias':>8} {'RMSE':>8} {'Spρ':>8} "
+        f"{'P@11':>8} {'haulR':>8} {'capR':>8} {'xiR':>8}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for model in models:
-        m = model_metrics(subset, model)
+        model_rows = subset
+        projections = {r["pid"]: r["pred"][model] for r in model_rows}
+        actuals = {r["pid"]: r["actual"] for r in model_rows}
+        minutes = {r["pid"]: r["minutes"] for r in model_rows}
+        pooled = {
+            "mae": mae(projections, actuals, minutes=minutes, played_only=played_only),
+            "bias": bias(projections, actuals, minutes=minutes, played_only=played_only),
+            "rmse": rmse(projections, actuals, minutes=minutes, played_only=played_only),
+        }
+        by_gw = defaultdict(list)
+        for r in model_rows:
+            by_gw[r["gw"]].append(r)
+        per_gw = {key: [] for key in PER_GW_AVG_KEYS}
+        for gw_rows in by_gw.values():
+            proj, act, mins, players = _maps_from_rows(gw_rows, model)
+            gm = gw_metrics(proj, act, minutes=mins, players=players)
+            for key in PER_GW_AVG_KEYS:
+                per_gw[key].append(gm[key])
+        metrics = dict(pooled)
+        for key in PER_GW_AVG_KEYS:
+            metrics[key] = mean_metric(per_gw[key])
         print(
-            f"{model:<8} {fmt(m['mae'])} {fmt(m['bias'])} "
-            f"{fmt(m['spearman'])} {fmt(m['p11'])}"
+            f"{model:<8} {fmt_metric(metrics['mae'])} {fmt_metric(metrics['bias'])} "
+            f"{fmt_metric(metrics['rmse'])} {fmt_metric(metrics['spearman'])} "
+            f"{fmt_metric(metrics['p_at_11'])} {fmt_metric(metrics['haul_recall'])} "
+            f"{fmt_metric(metrics['captain_regret'])} {fmt_metric(metrics['xi_regret'])}"
         )
     print()
     return subset
+
+
+def _gw_metric_maps(gw_rows, models):
+    out = {}
+    for model in models:
+        out[model] = _maps_from_rows(gw_rows, model)
+    return out
+
+
+def per_gw_head_to_head(rows, models, baseline="v2", gw_range=None, played_only=True):
+    """Count per-GW metric wins vs baseline across challengers."""
+    lo, hi = gw_range or (2, 38)
+    challengers = [m for m in models if m != baseline]
+    wins = {m: {metric: 0 for metric in H2H_METRICS} for m in challengers}
+    eligible_gws = 0
+
+    by_gw = defaultdict(list)
+    for r in rows:
+        if lo <= r["gw"] <= hi:
+            by_gw[r["gw"]].append(r)
+
+    for gw_rows in by_gw.values():
+        if played_only:
+            gw_rows = [r for r in gw_rows if r["minutes"] > 0]
+        gw_rows = [
+            r
+            for r in gw_rows
+            if all(r["pred"].get(m) is not None for m in models)
+        ]
+        if not gw_rows:
+            continue
+        maps = _gw_metric_maps(gw_rows, models + (baseline,))
+        base_proj, base_act, base_mins, base_players = maps[baseline]
+        base_m = gw_metrics(
+            base_proj, base_act, minutes=base_mins, players=base_players
+        )
+        eligible_gws += 1
+        for challenger in challengers:
+            proj, act, mins, players = maps[challenger]
+            cm = gw_metrics(proj, act, minutes=mins, players=players)
+            for metric in H2H_METRICS:
+                bval = base_m[metric]
+                cval = cm[metric]
+                if bval is None or cval is None:
+                    continue
+                lower_better = metric in ("mae", "rmse", "captain_regret", "xi_regret")
+                if lower_better and cval < bval:
+                    wins[challenger][metric] += 1
+                elif not lower_better and cval > bval:
+                    wins[challenger][metric] += 1
+
+    return wins, eligible_gws
+
+
+def print_head_to_head(rows):
+    wins, eligible = per_gw_head_to_head(
+        rows,
+        INTERSECTION_MODELS,
+        baseline="v2",
+        gw_range=HEADLINE_GW,
+        played_only=True,
+    )
+    lo, hi = HEADLINE_GW
+    print(f"=== Per-GW head-to-head vs v2 (intersection, GW{lo}–{hi}, mins>0) ===")
+    print(f"eligible GWs={eligible}")
+    hdr = f"{'model':<8}" + "".join(f" {m:>8}" for m in H2H_METRICS)
+    print(hdr)
+    print("-" * len(hdr))
+    for model in ("v3a", "v3b", "naive", "v1"):
+        if model not in wins:
+            continue
+        row = f"{model:<8}" + "".join(
+            f" {wins[model][metric]:>8}" for metric in H2H_METRICS
+        )
+        print(row)
+    print()
 
 
 def print_verdict(rows):
@@ -289,12 +350,20 @@ def print_verdict(rows):
     subset = intersection_rows(
         rows, INTERSECTION_MODELS, gw_range=HEADLINE_GW, played_only=True
     )
-    baseline = model_metrics(subset, "v2")
+    baseline = aggregate_model_metrics(subset, "v2", played_only=False)
     print("=== Verdict (v3a/v3b vs v2, GW20–38 mins>0 intersection) ===")
     for challenger in ("v3a", "v3b"):
-        m = model_metrics(subset, challenger)
-        mae_ok = m["mae"] is not None and baseline["mae"] is not None and m["mae"] < baseline["mae"]
-        p11_ok = m["p11"] is not None and baseline["p11"] is not None and m["p11"] > baseline["p11"]
+        m = aggregate_model_metrics(subset, challenger, played_only=False)
+        mae_ok = (
+            m["mae"] is not None
+            and baseline["mae"] is not None
+            and m["mae"] < baseline["mae"]
+        )
+        p11_ok = (
+            m["p_at_11"] is not None
+            and baseline["p_at_11"] is not None
+            and m["p_at_11"] > baseline["p_at_11"]
+        )
         passed = mae_ok and p11_ok
         mae_delta = (
             m["mae"] - baseline["mae"]
@@ -302,14 +371,14 @@ def print_verdict(rows):
             else None
         )
         p11_delta = (
-            m["p11"] - baseline["p11"]
-            if m["p11"] is not None and baseline["p11"] is not None
+            m["p_at_11"] - baseline["p_at_11"]
+            if m["p_at_11"] is not None and baseline["p_at_11"] is not None
             else None
         )
         verdict = "PASS" if passed else "FAIL"
         print(
             f"{challenger} vs v2: {verdict} "
-            f"(ΔMAE={fmt(mae_delta)}, ΔP@11={fmt(p11_delta)})"
+            f"(ΔMAE={fmt_metric(mae_delta)}, ΔP@11={fmt_metric(p11_delta)})"
         )
     print()
 
@@ -321,7 +390,7 @@ def print_summary(rows, skips):
     print()
     header = (
         f"{'model':<8} {'univ':<8} {'n':>7} {'MAE':>8} {'bias':>8} "
-        f"{'Spearman':>8} {'P@11':>8}"
+        f"{'RMSE':>8} {'Spρ':>8} {'P@11':>8}"
     )
     print(header)
     print("-" * len(header))
@@ -330,16 +399,56 @@ def print_summary(rows, skips):
             subset = scored(universe(rows, played_only), model)
             n = len(subset)
             if model == "crowd":
-                mae, bias = mae_bias(rank_errors(subset, model))
+                mae_v, bias_v = (
+                    (sum(abs(e) for e in rank_errors(subset, model)) / len(rank_errors(subset, model)))
+                    if rank_errors(subset, model)
+                    else None
+                ), (
+                    (sum(rank_errors(subset, model)) / len(rank_errors(subset, model)))
+                    if rank_errors(subset, model)
+                    else None
+                )
+                rho = mean_metric(
+                    [
+                        spearman(
+                            {r["pid"]: r["pred"][model] for r in gw_rows},
+                            {r["pid"]: r["actual"] for r in gw_rows},
+                        )
+                        for gw_rows in _group_by_gw(subset).values()
+                        if len(gw_rows) >= 2
+                    ]
+                )
+                p11 = mean_metric(
+                    [
+                        p_at_11(
+                            {r["pid"]: r["pred"][model] for r in gw_rows},
+                            {r["pid"]: r["actual"] for r in gw_rows},
+                        )
+                        for gw_rows in _group_by_gw(subset).values()
+                    ]
+                )
+                rmse_v = None
             else:
-                mae, bias = mae_bias(point_errors(subset, model))
-            rho, _ = gw_spearman(subset, model)
-            p11, _ = gw_precision(subset, model)
+                metrics = aggregate_model_metrics(subset, model, played_only=False)
+                mae_v, bias_v, rmse_v, rho, p11 = (
+                    metrics["mae"],
+                    metrics["bias"],
+                    metrics["rmse"],
+                    metrics["spearman"],
+                    metrics["p_at_11"],
+                )
             print(
-                f"{model:<8} {label:<8} {n:>7} {fmt(mae)} {fmt(bias)} "
-                f"{fmt(rho)} {fmt(p11)}"
+                f"{model:<8} {label:<8} {n:>7} {fmt_metric(mae_v)} {fmt_metric(bias_v)} "
+                f"{fmt_metric(rmse_v)} {fmt_metric(rho)} {fmt_metric(p11)}"
             )
     print()
+
+
+def _group_by_gw(rows):
+    by_gw = defaultdict(list)
+    for r in rows:
+        by_gw[r["gw"]].append(r)
+    return by_gw
 
 
 def print_segments(rows):
@@ -355,12 +464,28 @@ def print_segments(rows):
                 for played_only, label in ((False, "all"), (True, "mins>0")):
                     subset = [r for r in scored(universe(rows, played_only), model) if filt(r)]
                     if model == "crowd":
-                        mae, bias = mae_bias(rank_errors(subset, model))
+                        errs = rank_errors(subset, model)
+                        mae_v = sum(abs(e) for e in errs) / len(errs) if errs else None
+                        bias_v = sum(errs) / len(errs) if errs else None
                     else:
-                        mae, bias = mae_bias(point_errors(subset, model))
+                        projections = {r["pid"]: r["pred"][model] for r in subset}
+                        actuals = {r["pid"]: r["actual"] for r in subset}
+                        minutes = {r["pid"]: r["minutes"] for r in subset}
+                        mae_v = mae(
+                            projections,
+                            actuals,
+                            minutes=minutes,
+                            played_only=played_only,
+                        )
+                        bias_v = bias(
+                            projections,
+                            actuals,
+                            minutes=minutes,
+                            played_only=played_only,
+                        )
                     print(
                         f"{gname:<14} {model:<8} {label:<8} {len(subset):>7} "
-                        f"{fmt(mae)} {fmt(bias)}"
+                        f"{fmt_metric(mae_v)} {fmt_metric(bias_v)}"
                     )
 
     block(
@@ -390,21 +515,22 @@ def print_worst_players(rows):
     for pid, recs in by_pid.items():
         if len(recs) < MIN_GWS_FOR_PLAYER:
             continue
-        mae = sum(abs(r["actual"] - r["pred"]["v2"]) for r in recs) / len(recs)
-        ranked.append((mae, pid, recs))
+        errs = [r["actual"] - r["pred"]["v2"] for r in recs]
+        mae_v = sum(abs(e) for e in errs) / len(errs)
+        ranked.append((mae_v, pid, recs))
     ranked.sort(reverse=True)
 
     hdr = f"{'Name':<18} {'Pos':<4} {'£m':>5} {'n':>4} {'MAE':>7} {'bias':>7}"
     print(hdr)
     print("-" * len(hdr))
-    for mae, pid, recs in ranked[:20]:
-        bias = sum(r["actual"] - r["pred"]["v2"] for r in recs) / len(recs)
+    for mae_v, pid, recs in ranked[:20]:
+        bias_v = sum(r["actual"] - r["pred"]["v2"] for r in recs) / len(recs)
         etype = recs[0]["etype"]
         price = sum(r["price"] for r in recs) / len(recs)
         name = recs[0]["name"]
         print(
             f"{name:<18} {POSITION_LABELS[etype]:<4} {price:>5.1f} {len(recs):>4} "
-            f"{mae:>7.3f} {bias:>+7.3f}"
+            f"{mae_v:>7.3f} {bias_v:>+7.3f}"
         )
 
 
@@ -437,6 +563,7 @@ def main():
         played_only=True,
     )
 
+    print_head_to_head(rows)
     print_summary(rows, skips)
     print_segments(rows)
     print_worst_players(rows)

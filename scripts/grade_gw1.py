@@ -8,6 +8,7 @@ from fpl_agent.data import (
     fetch_live_bootstrap,
     load_snapshot,
 )
+from fpl_agent.metrics import fmt_metric, gw_metrics, point_errors
 
 # --- 1. Load frozen pre-GW bootstrap: ep_next per player ---
 snap = load_snapshot(1)
@@ -21,32 +22,39 @@ live_by_id = {}
 for p in live["elements"]:
     live_by_id[p["id"]] = (p["web_name"], p["event_points"], p["minutes"])
 
-# --- 3. Errors for anyone who played (minutes > 0): MAE and mean bias ---
-# error = actual − predicted; bias > 0 means ep_next underpredicted
-errors = []  # (error, web_name, predicted, actual, minutes)
-for pid, (web_name, actual_pts, minutes) in live_by_id.items():
-    if minutes <= 0:
-        continue
-    if pid not in predicted_by_id:
+# --- 3. Build projection/actual maps for played players ---
+projections = {}
+actuals = {}
+minutes = {}
+names = {}
+for pid, (web_name, actual_pts, mins) in live_by_id.items():
+    minutes[pid] = mins
+    if mins <= 0 or pid not in predicted_by_id:
         continue
     _, predicted = predicted_by_id[pid]
-    error = actual_pts - predicted
-    errors.append((error, web_name, predicted, actual_pts, minutes))
+    projections[pid] = predicted
+    actuals[pid] = actual_pts
+    names[pid] = web_name
 
-n = len(errors)
-mae = sum(abs(e[0]) for e in errors) / n if n else 0.0
-bias = sum(e[0] for e in errors) / n if n else 0.0
+metrics = gw_metrics(projections, actuals, minutes=minutes, played_only=True)
+errors = point_errors(projections, actuals, minutes=minutes, played_only=True)
+detail = sorted(
+    (
+        (actuals[pid] - projections[pid], names[pid], projections[pid], actuals[pid], minutes[pid])
+        for pid in projections
+    ),
+    key=lambda row: row[0],
+)
 
 # --- 4. My final XI + captain vs the frozen 33.2 projection ---
 picks_payload = fetch_entry_picks(event=1)
 my_predicted = snap["prediction"]["projected_score"]
 
-# Actual GW1 score: starting XI event_points, captain (multiplier) applied
 my_actual = 0
 for pick in picks_payload["picks"]:
     multiplier = pick.get("multiplier") or 0
     if multiplier <= 0:
-        continue  # bench (or unused)
+        continue
     _, event_points, _ = live_by_id[pick["element"]]
     my_actual += event_points * multiplier
 
@@ -57,21 +65,23 @@ print(f"Actual:    {my_actual}")
 print(f"Delta:     {my_actual - my_predicted:+.1f}")
 print()
 
+n = len(errors)
 print(f"=== Baseline (players with minutes > 0, n={n}) ===")
-print(f"MAE:  {mae:.2f}")
-print(f"Bias: {bias:+.2f}  (actual − predicted; positive = underpredicted)")
+print(f"MAE:  {fmt_metric(metrics['mae'], width=0, nd=2)}")
+print(f"Bias: {fmt_metric(metrics['bias'], width=0, nd=2)}  (actual − predicted; positive = underpredicted)")
+print(f"RMSE: {fmt_metric(metrics['rmse'], width=0, nd=2)}")
 print()
 
-over = sorted(errors, key=lambda row: row[0], reverse=True)[:10]
-under = sorted(errors, key=lambda row: row[0])[:10]
+over = sorted(detail, key=lambda row: row[0], reverse=True)[:10]
+under = detail[:10]
 
 print("=== 10 biggest overperforms (actual >> predicted) ===")
 print(f"{'Name':<16} {'Pred':>6} {'Act':>5} {'Err':>7} {'Mins':>5}")
-for error, name, pred, actual, minutes in over:
-    print(f"{name:<16} {pred:>6.1f} {actual:>5} {error:>+7.1f} {minutes:>5}")
+for error, name, pred, actual, mins in over:
+    print(f"{name:<16} {pred:>6.1f} {actual:>5} {error:>+7.1f} {mins:>5}")
 print()
 
 print("=== 10 biggest underperforms (actual << predicted) ===")
 print(f"{'Name':<16} {'Pred':>6} {'Act':>5} {'Err':>7} {'Mins':>5}")
-for error, name, pred, actual, minutes in under:
-    print(f"{name:<16} {pred:>6.1f} {actual:>5} {error:>+7.1f} {minutes:>5}")
+for error, name, pred, actual, mins in under:
+    print(f"{name:<16} {pred:>6.1f} {actual:>5} {error:>+7.1f} {mins:>5}")
