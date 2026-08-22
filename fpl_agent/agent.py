@@ -25,9 +25,11 @@ SYSTEM_TEXT = (
     "tool for it, say so. State dates, times and weekdays only as returned by "
     "tools — never compute calendar facts yourself. Recommendations end with a "
     "one-line WHY citing numbers. "
-    "If audit_squad (or any tool) returns deadline_passed true, open by stating "
-    "that this gameweek is locked and frame all advice toward the next deadline "
-    "returned as next_deadline."
+    "Call get_context first when advice is time-sensitive. "
+    "If gw_state is in_progress, the current gameweek is LOCKED — frame all "
+    "recommendations toward next_gw and say so up front. "
+    "For questions about beating my league, mini-league strategy, or "
+    "differentials, use get_rivals."
 )
 
 

@@ -1,9 +1,15 @@
 """Agent tools wrapping snapshot data, projections, and the optimizer."""
 
+import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
+import requests
+
 from fpl_agent.data import (
+    ENTRY_ID,
+    ENTRY_PICKS_URL,
     POSITION_LABELS,
     build_players,
     load_history,
@@ -16,10 +22,27 @@ from fpl_agent.projections import expected_minutes, per_90_rates, project
 
 MODELS = ("v0", "v1", "v2")
 GW = 1
+ENTRY_URL = "https://fantasy.premierleague.com/api/entry/{entry_id}/"
+LEAGUE_STANDINGS_URL = (
+    "https://fantasy.premierleague.com/api/leagues-classic/{league_id}/standings/"
+)
+PICKS_SLEEP_S = 0.3
 FLAGGED = {"i", "d", "s", "u", "n"}
 IST = timezone(timedelta(hours=5, minutes=30))
 
 TOOLS = [
+    {
+        "name": "get_context",
+        "description": (
+            "Return current time (UTC/IST), gameweek state, next deadline, and "
+            "hours remaining. Call first when advice is time-sensitive."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "get_my_squad",
         "description": (
@@ -72,8 +95,8 @@ TOOLS = [
     {
         "name": "audit_squad",
         "description": (
-            "Check my squad for captain/injury/bench-order issues and return the "
-            "next deadline time plus a list of warnings."
+            "Check my squad for captain/injury/bench-order issues. Includes "
+            "gameweek context (deadline, gw_state) and a list of warnings."
         ),
         "input_schema": {
             "type": "object",
@@ -93,6 +116,28 @@ TOOLS = [
                     "type": "integer",
                     "description": "Gameweek number. Default 1.",
                 }
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_rivals",
+        "description": (
+            "Mini-league standings, rival ownership, differentials, template threats, "
+            "and captain spread for the last locked gameweek. Auto-picks your smallest "
+            "private classic league unless league_id is given."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "league_id": {
+                    "type": "integer",
+                    "description": "Classic league id. Omit to auto-select smallest private league.",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Number of top standings entries to sample. Default 10.",
+                },
             },
             "additionalProperties": False,
         },
@@ -227,9 +272,20 @@ def _format_deadline(ev):
     }
 
 
-def _deadline_status(bootstrap):
-    """Compare now (UTC) to transfer deadline; find earliest future deadline."""
-    now = datetime.now(timezone.utc)
+def _format_now(now):
+    ist_dt = now.astimezone(IST)
+    return {
+        "now_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "now_ist": (
+            f"{ist_dt.strftime('%a')} {ist_dt.day} {ist_dt.strftime('%b')}, "
+            f"{ist_dt.strftime('%I:%M %p')}"
+        ),
+    }
+
+
+def _build_gw_context(bootstrap, now=None):
+    """Single source of time/GW truth from bootstrap events + now (UTC)."""
+    now = now or datetime.now(timezone.utc)
     events = bootstrap.get("events") or []
 
     dated = []
@@ -240,25 +296,302 @@ def _deadline_status(bootstrap):
         dated.append((_parse_deadline(iso), ev))
     dated.sort(key=lambda pair: pair[0])
 
-    next_ev = next((ev for dt, ev in dated if dt > now), None)
-    next_deadline = _format_deadline(next_ev) if next_ev else None
+    current_gw = None
+    for deadline, ev in reversed(dated):
+        if deadline <= now and not ev.get("finished"):
+            current_gw = ev.get("id")
+            break
 
-    transfer_ev = next((e for e in events if e.get("is_next")), None)
-    if transfer_ev is None:
-        transfer_ev = next((e for e in events if e.get("is_current")), None)
-
-    if transfer_ev and transfer_ev.get("deadline_time"):
-        deadline_passed = now >= _parse_deadline(transfer_ev["deadline_time"])
+    next_pair = next(((dt, ev) for dt, ev in dated if dt > now), None)
+    if next_pair:
+        next_deadline_dt, next_ev = next_pair
+        next_gw = next_ev.get("id")
+        next_deadline = _format_deadline(next_ev)
+        hours_to_deadline = round((next_deadline_dt - now).total_seconds() / 3600.0, 1)
     else:
-        deadline_passed = next_deadline is None
+        next_gw = None
+        next_deadline = None
+        hours_to_deadline = None
 
-    return deadline_passed, next_deadline
+    if current_gw is not None:
+        gw_state = "in_progress"
+    elif next_pair is not None:
+        gw_state = "pre_deadline"
+    else:
+        gw_state = "finished"
+
+    return {
+        **_format_now(now),
+        "current_gw": current_gw,
+        "next_gw": next_gw,
+        "next_deadline": next_deadline,
+        "hours_to_deadline": hours_to_deadline,
+        "gw_state": gw_state,
+    }
+
+
+def get_context():
+    snap, _players, _history, _picks = _ctx()
+    return _build_gw_context(snap["bootstrap"])
+
+
+def _locked_gw(bootstrap, context):
+    """Last GW whose deadline has passed (picks may be public)."""
+    if context.get("current_gw") is not None:
+        return context["current_gw"]
+    now = datetime.now(timezone.utc)
+    locked = None
+    for ev in bootstrap.get("events") or []:
+        iso = ev.get("deadline_time")
+        if iso and _parse_deadline(iso) <= now:
+            locked = ev.get("id")
+    return locked
+
+
+def _deadline_passed_for_gw(bootstrap, gw):
+    ev = next((e for e in bootstrap.get("events") or [] if e.get("id") == gw), None)
+    if not ev or not ev.get("deadline_time"):
+        return False
+    return datetime.now(timezone.utc) >= _parse_deadline(ev["deadline_time"])
+
+
+def _fetch_json(url):
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _fetch_entry(entry_id=ENTRY_ID):
+    return _fetch_json(ENTRY_URL.format(entry_id=entry_id))
+
+
+def _fetch_league_standings(league_id):
+    return _fetch_json(LEAGUE_STANDINGS_URL.format(league_id=league_id))
+
+
+def _fetch_entry_picks(entry_id, gw):
+    url = ENTRY_PICKS_URL.format(entry_id=entry_id, event=gw)
+    resp = requests.get(url, timeout=30)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _mini_classic_leagues(entry_data):
+    """User-created classic leagues (exclude Overall / country system leagues)."""
+    classics = entry_data.get("leagues", {}).get("classic") or []
+    return [league for league in classics if league.get("league_type") == "c"]
+
+
+def _league_catalog(mini_leagues):
+    catalog = []
+    for league in mini_leagues:
+        standings = _fetch_league_standings(league["id"])
+        size = len(standings.get("standings", {}).get("results") or [])
+        catalog.append(
+            {
+                "id": league["id"],
+                "name": league.get("name") or f"League {league['id']}",
+                "my_rank": league.get("entry_rank"),
+                "size": size,
+            }
+        )
+    catalog.sort(key=lambda row: (row["size"], row["id"]))
+    return catalog
+
+
+def _pick_smallest_league(catalog):
+    if not catalog:
+        return None
+    return catalog[0]
+
+
+def get_rivals(league_id=None, top_n=10):
+    snap, players, _history, _picks = _ctx()
+    bootstrap = snap["bootstrap"]
+    context = _build_gw_context(bootstrap)
+    locked_gw = _locked_gw(bootstrap, context)
+    top_n = max(1, int(top_n or 10))
+
+    entry = _fetch_entry(ENTRY_ID)
+    mini = _mini_classic_leagues(entry)
+    catalog = _league_catalog(mini) if mini else []
+
+    if league_id is None:
+        chosen = _pick_smallest_league(catalog)
+        if chosen is None:
+            return {
+                "error": "No private classic leagues found on this entry.",
+                "classic_leagues": catalog,
+            }
+        league_id = chosen["id"]
+        league_name = chosen["name"]
+        my_rank = chosen["my_rank"]
+    else:
+        league_name = next(
+            (row["name"] for row in catalog if row["id"] == league_id),
+            f"League {league_id}",
+        )
+        my_rank = next(
+            (row["my_rank"] for row in catalog if row["id"] == league_id),
+            None,
+        )
+
+    if locked_gw is None:
+        target = context.get("next_gw") or 1
+        return {
+            "message": f"picks not yet public for gw {target}",
+            "league_id": league_id,
+            "league_name": league_name,
+            "classic_leagues": catalog,
+            **context,
+        }
+
+    if not _deadline_passed_for_gw(bootstrap, locked_gw):
+        return {
+            "message": f"picks not yet public for gw {locked_gw}",
+            "league_id": league_id,
+            "league_name": league_name,
+            "locked_gw": locked_gw,
+            "classic_leagues": catalog,
+            **context,
+        }
+
+    standings_data = _fetch_league_standings(league_id)
+    results = standings_data.get("standings", {}).get("results") or []
+    standings = [
+        {
+            "entry_id": row["entry"],
+            "team_name": row.get("entry_name") or "",
+            "player_name": row.get("player_name") or "",
+            "total_points": row.get("total"),
+            "rank": row.get("rank"),
+        }
+        for row in results[:top_n]
+    ]
+
+    rival_entries = [row["entry_id"] for row in standings if row["entry_id"] != ENTRY_ID]
+
+    ownership_counts = Counter()
+    captain_counts = Counter()
+    sampled = 0
+    fetch_failures = 0
+    picks_public = False
+
+    for idx, entry_id in enumerate(rival_entries):
+        if idx > 0:
+            time.sleep(PICKS_SLEEP_S)
+        picks_data = _fetch_entry_picks(entry_id, locked_gw)
+        if picks_data is None:
+            fetch_failures += 1
+            if not _deadline_passed_for_gw(bootstrap, locked_gw):
+                return {
+                    "message": f"picks not yet public for gw {locked_gw}",
+                    "league_id": league_id,
+                    "league_name": league_name,
+                    "locked_gw": locked_gw,
+                    "classic_leagues": catalog,
+                    **context,
+                }
+            continue
+        picks_public = True
+        sampled += 1
+        squad_ids = {p["element"] for p in picks_data.get("picks") or []}
+        ownership_counts.update(squad_ids)
+        captain_id = next(
+            (p["element"] for p in picks_data.get("picks") or [] if p.get("is_captain")),
+            None,
+        )
+        if captain_id is not None:
+            captain_counts[captain_id] += 1
+
+    if not picks_public and sampled == 0:
+        return {
+            "message": f"picks not yet public for gw {locked_gw}",
+            "league_id": league_id,
+            "league_name": league_name,
+            "locked_gw": locked_gw,
+            "fetch_failures": fetch_failures,
+            "classic_leagues": catalog,
+            **context,
+        }
+
+    my_picks_data = _fetch_entry_picks(ENTRY_ID, locked_gw)
+    if my_picks_data is None:
+        my_ids = {p["element"] for p in load_my_picks(snap["gw"])}
+    else:
+        my_ids = {p["element"] for p in my_picks_data.get("picks") or []}
+
+    denom = sampled or 1
+    ownership_in_league = []
+    for pid, count in ownership_counts.most_common():
+        p = players.get(pid)
+        ownership_in_league.append(
+            {
+                "id": pid,
+                "name": p["web_name"] if p else str(pid),
+                "owned_count": count,
+                "owned_pct": round(100.0 * count / denom, 1),
+            }
+        )
+
+    my_differentials = []
+    for pid in sorted(my_ids):
+        if pid not in players:
+            continue
+        count = ownership_counts.get(pid, 0)
+        pct = round(100.0 * count / denom, 1)
+        if pct < 30.0:
+            my_differentials.append(
+                {
+                    "id": pid,
+                    "name": players[pid]["web_name"],
+                    "owned_count": count,
+                    "owned_pct": pct,
+                }
+            )
+
+    threats = [
+        row
+        for row in ownership_in_league
+        if row["id"] not in my_ids and row["owned_pct"] > 50.0
+    ]
+
+    captain_spread = []
+    for pid, count in captain_counts.most_common():
+        p = players.get(pid)
+        captain_spread.append(
+            {
+                "captain_id": pid,
+                "captain_name": p["web_name"] if p else str(pid),
+                "count": count,
+                "pct": round(100.0 * count / denom, 1),
+            }
+        )
+
+    return {
+        "league_id": league_id,
+        "league_name": league_name,
+        "my_rank": my_rank,
+        "classic_leagues": catalog,
+        "locked_gw": locked_gw,
+        "top_n": top_n,
+        "standings": standings,
+        "rivals_sampled": sampled,
+        "fetch_failures": fetch_failures,
+        "ownership_in_league": ownership_in_league,
+        "my_differentials": sorted(my_differentials, key=lambda r: r["owned_pct"]),
+        "threats": sorted(threats, key=lambda r: -r["owned_pct"]),
+        "captain_spread": captain_spread,
+        **context,
+    }
 
 
 def get_my_squad():
     snap, players, history, picks = _ctx()
     squad = [_player_row(pick, players[pick["element"]], history) for pick in picks]
-    return {"gw": snap["gw"], "entry_id": 4796993, "squad": squad}
+    return {"gw": snap["gw"], "entry_id": ENTRY_ID, "squad": squad}
 
 
 def project_points(model="v2"):
@@ -333,8 +666,8 @@ def optimize_squad(model="v2"):
 def audit_squad():
     snap, players, history, picks = _ctx()
     proj = project(players, history, snap["fixtures"], "v2")
+    context = _build_gw_context(snap["bootstrap"])
     warnings = []
-    deadline_passed, next_deadline = _deadline_status(snap["bootstrap"])
 
     captain = next((pk for pk in picks if pk.get("is_captain")), None)
     if captain:
@@ -392,8 +725,7 @@ def audit_squad():
 
     return {
         "gw": snap["gw"],
-        "deadline_passed": deadline_passed,
-        "next_deadline": next_deadline,
+        **context,
         "warnings": warnings,
         "ok": not warnings,
     }
@@ -437,11 +769,16 @@ def suggest_transfers(model="v2", min_gain=1.0):
 
 
 HANDLERS = {
+    "get_context": lambda args: get_context(),
     "get_my_squad": lambda args: get_my_squad(),
     "project_points": lambda args: project_points(model=(args or {}).get("model") or "v2"),
     "optimize_squad": lambda args: optimize_squad(model=(args or {}).get("model") or "v2"),
     "audit_squad": lambda args: audit_squad(),
     "get_fixtures": lambda args: get_fixtures(gw=int((args or {}).get("gw") or 1)),
+    "get_rivals": lambda args: get_rivals(
+        league_id=(args or {}).get("league_id"),
+        top_n=int((args or {}).get("top_n") or 10),
+    ),
     "suggest_transfer": lambda args: suggest_transfers(
         model=(args or {}).get("model") or "v2",
         min_gain=(args or {}).get("min_gain") or 1.0,
