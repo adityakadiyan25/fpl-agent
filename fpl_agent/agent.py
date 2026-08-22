@@ -1,5 +1,6 @@
 """FPL assistant: Claude + tools over the GW1 snapshot."""
 
+import copy
 import json
 import os
 import sys
@@ -11,7 +12,14 @@ from fpl_agent.tools import TOOLS, dispatch
 
 MODEL = "claude-sonnet-4-6"
 MAX_TURNS = 8
-SYSTEM = (
+# verify current rates at docs.claude.com (Claude Sonnet 4.6, per million tokens)
+PRICING = {
+    "input": 3.0,
+    "output": 15.0,
+    "cache_write": 3.75,
+    "cache_read": 0.30,
+}
+SYSTEM_TEXT = (
     "You are an FPL assistant managing team 4796993. Use tools to answer. "
     "Every numeric claim must come from a tool result — if you didn't call a "
     "tool for it, say so. State dates, times and weekdays only as returned by "
@@ -65,6 +73,56 @@ def _text_from(content):
     return "\n".join(parts).strip()
 
 
+def _cached_system():
+    return [
+        {
+            "type": "text",
+            "text": SYSTEM_TEXT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def _cached_tools():
+    tools = copy.deepcopy(TOOLS)
+    tools[-1]["cache_control"] = {"type": "ephemeral"}
+    return tools
+
+
+def _usage_fields(usage):
+    return {
+        "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+        "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+        "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+    }
+
+
+def _add_usage(totals, usage):
+    fields = _usage_fields(usage)
+    for key, val in fields.items():
+        totals[key] += val
+    return fields
+
+
+def _run_cost(totals):
+    cost = (
+        totals["input_tokens"] * PRICING["input"]
+        + totals["output_tokens"] * PRICING["output"]
+        + totals["cache_creation_input_tokens"] * PRICING["cache_write"]
+        + totals["cache_read_input_tokens"] * PRICING["cache_read"]
+    ) / 1_000_000
+    input_total = (
+        totals["input_tokens"]
+        + totals["cache_creation_input_tokens"]
+        + totals["cache_read_input_tokens"]
+    )
+    cached_pct = (
+        100.0 * totals["cache_read_input_tokens"] / input_total if input_total else 0.0
+    )
+    return cost, cached_pct
+
+
 def run(question):
     load_dotenv()
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -83,10 +141,16 @@ def run(question):
     trace = _trace_path()
     n_turns = 0
     n_tools = 0
-    total_in = 0
-    total_out = 0
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
     final_text = ""
     hit_limit = False
+    system = _cached_system()
+    tools = _cached_tools()
 
     for _ in range(MAX_TURNS):
         n_turns += 1
@@ -94,16 +158,13 @@ def run(question):
         response = client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            system=SYSTEM,
-            tools=TOOLS,
+            temperature=0,
+            system=system,
+            tools=tools,
             messages=messages,
         )
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        usage = response.usage
-        inp = getattr(usage, "input_tokens", 0) or 0
-        out = getattr(usage, "output_tokens", 0) or 0
-        total_in += inp
-        total_out += out
+        usage_fields = _add_usage(totals, response.usage)
 
         text = _text_from(response.content)
         tool_blocks = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
@@ -116,8 +177,7 @@ def run(question):
                 "args": None,
                 "result": _truncate(text or f"({len(tool_blocks)} tool_use)"),
                 "latency_ms": latency_ms,
-                "input_tokens": inp,
-                "output_tokens": out,
+                **usage_fields,
             },
         )
 
@@ -139,6 +199,8 @@ def run(question):
                         "latency_ms": tool_ms,
                         "input_tokens": None,
                         "output_tokens": None,
+                        "cache_creation_input_tokens": None,
+                        "cache_read_input_tokens": None,
                     },
                 )
                 results.append(
@@ -160,7 +222,20 @@ def run(question):
         print("Turn limit (8) was hit before the model finished.")
     if final_text:
         print(final_text)
-    print(f"turns={n_turns} tools={n_tools} tokens={total_in + total_out} (in={total_in} out={total_out})")
+    cost, cached_pct = _run_cost(totals)
+    token_total = (
+        totals["input_tokens"]
+        + totals["output_tokens"]
+        + totals["cache_creation_input_tokens"]
+        + totals["cache_read_input_tokens"]
+    )
+    print(
+        f"turns={n_turns} tools={n_tools} tokens={token_total} "
+        f"(in={totals['input_tokens']} out={totals['output_tokens']} "
+        f"cache_write={totals['cache_creation_input_tokens']} "
+        f"cache_read={totals['cache_read_input_tokens']}) "
+        f"cost=${cost:.3f} (cached {cached_pct:.0f}%)"
+    )
     print(f"trace={trace}")
 
 
