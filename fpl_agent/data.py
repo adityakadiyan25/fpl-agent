@@ -29,6 +29,31 @@ def snapshot_dir(gw):
     return SNAPSHOTS / f"gw{gw}"
 
 
+def latest_snapshot_gw(*, require_my_team=False):
+    """Highest snapshots/gw{N}/ with bootstrap-static.json (and optional my_team.json)."""
+    if not SNAPSHOTS.is_dir():
+        raise FileNotFoundError(f"No {SNAPSHOTS} directory")
+    gws = []
+    for path in SNAPSHOTS.iterdir():
+        if not path.is_dir() or not path.name.startswith("gw"):
+            continue
+        try:
+            n = int(path.name[2:])
+        except ValueError:
+            continue
+        if not (path / "bootstrap-static.json").exists():
+            continue
+        if require_my_team and not (path / "my_team.json").exists():
+            continue
+        gws.append(n)
+    if not gws:
+        need = "bootstrap-static.json"
+        if require_my_team:
+            need += " and my_team.json"
+        raise FileNotFoundError(f"No snapshot with {need} found")
+    return max(gws)
+
+
 def load_snapshot(gw):
     """Load frozen bootstrap + fixtures from snapshots/gw{gw}/."""
     folder = snapshot_dir(gw)

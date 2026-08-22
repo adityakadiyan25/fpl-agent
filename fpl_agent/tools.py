@@ -12,6 +12,7 @@ from fpl_agent.data import (
     ENTRY_PICKS_URL,
     POSITION_LABELS,
     build_players,
+    latest_snapshot_gw,
     load_history,
     load_my_bank,
     load_my_picks,
@@ -21,7 +22,6 @@ from fpl_agent.optimize import ATTACKERS, best_squad, best_xi, suggest_transfer
 from fpl_agent.projections import expected_minutes, per_90_rates, project
 
 MODELS = ("v0", "v1", "v2")
-GW = 1
 ENTRY_URL = "https://fantasy.premierleague.com/api/entry/{entry_id}/"
 LEAGUE_STANDINGS_URL = (
     "https://fantasy.premierleague.com/api/leagues-classic/{league_id}/standings/"
@@ -46,7 +46,7 @@ TOOLS = [
     {
         "name": "get_my_squad",
         "description": (
-            "Return my 15-man FPL squad from the GW1 snapshot: names, positions, "
+            "Return my 15-man FPL squad from the latest snapshot: names, positions, "
             "prices, captain/vice, injury and confidence flags."
         ),
         "input_schema": {
@@ -114,7 +114,7 @@ TOOLS = [
             "properties": {
                 "gw": {
                     "type": "integer",
-                    "description": "Gameweek number. Default 1.",
+                    "description": "Gameweek number. Default: snapshot gw.",
                 }
             },
             "additionalProperties": False,
@@ -169,12 +169,50 @@ TOOLS = [
 
 
 @lru_cache(maxsize=1)
+def _snap():
+    gw = latest_snapshot_gw()
+    return load_snapshot(gw)
+
+
+@lru_cache(maxsize=1)
+def _squad_snap():
+    gw = latest_snapshot_gw(require_my_team=True)
+    return load_snapshot(gw)
+
+
+@lru_cache(maxsize=1)
 def _ctx():
-    snap = load_snapshot(GW)
+    snap = _squad_snap()
+    gw = snap["gw"]
     players = build_players(snap["bootstrap"])
-    history = load_history(GW)
-    picks = load_my_picks(GW)
+    history = load_history(gw)
+    picks = load_my_picks(gw)
     return snap, players, history, picks
+
+
+def _meta_snap(tool_name):
+    if tool_name in ("get_context", "get_fixtures", "get_rivals"):
+        return _snap()
+    return _squad_snap()
+
+
+def _snapshot_time(snap):
+    path = snap["dir"] / "bootstrap-static.json"
+    mtime = path.stat().st_mtime
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _attach_meta(result, snap, tool_name=None):
+    """Add provenance block; result must be a mutable dict."""
+    model = result.get("model")
+    if model is None and tool_name == "audit_squad":
+        model = "v2"
+    result["_meta"] = {
+        "gw": snap["gw"],
+        "snapshot_time": _snapshot_time(snap),
+        "model": model,
+    }
+    return result
 
 
 def _model(args):
@@ -331,7 +369,7 @@ def _build_gw_context(bootstrap, now=None):
 
 
 def get_context():
-    snap, _players, _history, _picks = _ctx()
+    snap = _snap()
     return _build_gw_context(snap["bootstrap"])
 
 
@@ -408,7 +446,8 @@ def _pick_smallest_league(catalog):
 
 
 def get_rivals(league_id=None, top_n=10):
-    snap, players, _history, _picks = _ctx()
+    snap = _snap()
+    players = build_players(snap["bootstrap"])
     bootstrap = snap["bootstrap"]
     context = _build_gw_context(bootstrap)
     locked_gw = _locked_gw(bootstrap, context)
@@ -737,9 +776,9 @@ def audit_squad():
     }
 
 
-def get_fixtures(gw=1):
-    snap, players, history, picks = _ctx()
-    del players, history, picks
+def get_fixtures(gw=None):
+    snap = _snap()
+    gw = int(gw if gw is not None else snap["gw"])
     teams = {t["id"]: t["name"] for t in snap["teams"]}
     out = []
     for fx in snap["fixtures"]:
@@ -764,7 +803,7 @@ def suggest_transfers(model="v2", min_gain=1.0):
     snap, players, history, picks = _ctx()
     model = _model({"model": model})
     proj = project(players, history, snap["fixtures"], model)
-    bank = load_my_bank(GW)
+    bank = load_my_bank(snap["gw"])
     return {
         "gw": snap["gw"],
         "model": model,
@@ -780,7 +819,7 @@ HANDLERS = {
     "project_points": lambda args: project_points(model=(args or {}).get("model") or "v2"),
     "optimize_squad": lambda args: optimize_squad(model=(args or {}).get("model") or "v2"),
     "audit_squad": lambda args: audit_squad(),
-    "get_fixtures": lambda args: get_fixtures(gw=int((args or {}).get("gw") or 1)),
+    "get_fixtures": lambda args: get_fixtures(gw=(args or {}).get("gw")),
     "get_rivals": lambda args: get_rivals(
         league_id=(args or {}).get("league_id"),
         top_n=int((args or {}).get("top_n") or 10),
@@ -798,6 +837,10 @@ def dispatch(name, args):
         handler = HANDLERS.get(name)
         if handler is None:
             return {"error": f"Unknown tool {name!r}"}
-        return handler(args or {})
+        result = handler(args or {})
+        if isinstance(result, dict) and "error" not in result:
+            snap = _meta_snap(name)
+            _attach_meta(result, snap, tool_name=name)
+        return result
     except (Exception, SystemExit) as exc:
         return {"error": str(exc) or exc.__class__.__name__}

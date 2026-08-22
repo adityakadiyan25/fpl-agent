@@ -16,10 +16,13 @@ import requests
 from fpl_agent.data import POSITION_LABELS
 from fpl_agent.optimize import MIN_IN_XI, MAX_IN_XI, best_squad, best_xi
 from fpl_agent.projections import (
+    XGC_COLS,
     _crowd_play_prob,
     _ep_from_rates,
+    assert_pre_gw,
     expected_minutes_v2_from_apps,
     per_90_rates,
+    stable_rates_from_totals,
 )
 
 # xP is FPL's ep_this scraped after the GW; it may include post-match
@@ -70,6 +73,18 @@ def cache_csv(rel_path):
 def load_csv(path):
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def _require_xgc_columns(fieldnames):
+    if not fieldnames:
+        raise SystemExit("merged_gw.csv has no column headers")
+    missing = [col for col in XGC_COLS if col not in fieldnames]
+    if missing:
+        print(f"merged_gw.csv missing required columns: {missing}")
+        print("Actual columns:")
+        for col in fieldnames:
+            print(f"  {col}")
+        raise SystemExit(1)
 
 
 def download_season_files():
@@ -125,6 +140,7 @@ def gw_bundle(rows):
         starts = sum_rows(uniq, "starts")
     else:
         starts = sum(1 for r in uniq if _to_int(r.get("minutes")) >= 60)
+    has_xg = any(r.get("expected_goals") not in (None, "") for r in uniq)
     return {
         "name": first.get("name") or "",
         "position": first.get("position") or "",
@@ -139,6 +155,12 @@ def gw_bundle(rows):
         "assists": sum_rows(uniq, "assists"),
         "clean_sheets": sum_rows(uniq, "clean_sheets"),
         "bonus": sum_rows(uniq, "bonus"),
+        "expected_goals": sum_rows(uniq, "expected_goals", _to_float) if has_xg else 0.0,
+        "expected_assists": sum_rows(uniq, "expected_assists", _to_float) if has_xg else 0.0,
+        "expected_goal_involvements": (
+            sum_rows(uniq, "expected_goal_involvements", _to_float) if has_xg else 0.0
+        ),
+        "has_xg": has_xg,
         "xp": sum_rows(uniq, "xP", _to_float),
         "n_raw_rows": n_raw,
         "n_fixtures": len(uniq),
@@ -174,6 +196,9 @@ def rolling_totals(by_key, pid, before_gw):
         "clean_sheets": 0,
         "bonus": 0,
         "points": 0,
+        "expected_goals": 0.0,
+        "expected_assists": 0.0,
+        "xg_gws": 0,
         "n_played": 0,
         "last_minutes": 0,
         "last3_minutes": 0,
@@ -181,10 +206,12 @@ def rolling_totals(by_key, pid, before_gw):
         "lagged_selected": 0,
     }
     n_prior = before_gw - 1
+    feature_gws = []
     for gw in range(1, before_gw):
         rows = by_key.get((pid, gw))
         if not rows:
             continue
+        feature_gws.append(gw)
         b = gw_bundle(rows)
         acc["minutes"] += b["minutes"]
         acc["goals_scored"] += b["goals_scored"]
@@ -192,6 +219,10 @@ def rolling_totals(by_key, pid, before_gw):
         acc["clean_sheets"] += b["clean_sheets"]
         acc["bonus"] += b["bonus"]
         acc["points"] += b["points"]
+        if b.get("has_xg"):
+            acc["expected_goals"] += b["expected_goals"]
+            acc["expected_assists"] += b["expected_assists"]
+            acc["xg_gws"] += 1
         if b["minutes"] > 0:
             acc["n_played"] += 1
         if gw == n_prior:
@@ -200,6 +231,7 @@ def rolling_totals(by_key, pid, before_gw):
             acc["lagged_selected"] = b["selected"]
         if gw > n_prior - 3:
             acc["last3_minutes"] += b["minutes"]
+    assert_pre_gw(feature_gws, before_gw)
     acc["n_gws"] = n_prior
     return acc
 
@@ -222,6 +254,7 @@ def load_replay():
     """Cached 2025-26 merged_gw + players_raw, and 2024-25 prior totals."""
     merged_path, raw_path, prior_path = download_season_files()
     merged = load_csv(merged_path)
+    _require_xgc_columns(merged[0].keys() if merged else None)
     raw = load_csv(raw_path)
     prior_rows = load_csv(prior_path)
     by_key, max_gw = index_merged(merged)
@@ -300,35 +333,48 @@ def apply_v2(v1, form, was_home):
 def appearance_window(by_key, pid, before_gw, window=10):
     """Last N appearances (minutes>0) before before_gw."""
     apps = []
+    feature_gws = []
     for gw in range(before_gw - 1, 0, -1):
         rows = by_key.get((pid, gw))
         if not rows:
             continue
         bundle = gw_bundle(rows)
         if bundle["minutes"] > 0:
-            apps.append({"starts": bundle["starts"], "minutes": bundle["minutes"]})
+            apps.append(
+                {
+                    "starts": bundle["starts"],
+                    "minutes": bundle["minutes"],
+                    "_gw": gw,
+                }
+            )
+            feature_gws.append(gw)
             if len(apps) >= window:
                 break
+    assert_pre_gw(feature_gws, before_gw)
     return apps
 
 
-def compute_v3a(etype, prior, form, by_key, pid, before_gw, selected, was_home):
-    """v3a: appearance p_play × unshrunk form rates, then v2 availability/fixture."""
+def _form_as_window_totals(form):
+    return {
+        "minutes": form["minutes"],
+        "goals": form["goals_scored"],
+        "assists": form["assists"],
+        "clean_sheets": form["clean_sheets"],
+        "bonus": form["bonus"],
+        "expected_goals": form.get("expected_goals") or 0.0,
+        "expected_assists": form.get("expected_assists") or 0.0,
+        "xg_gws": form.get("xg_gws") or 0,
+    }
+
+
+def compute_v3(etype, prior, form, by_key, pid, before_gw, selected, was_home, use_xg=False, fallback_counter=None):
+    """v3a/v3b: appearance p_play × stable rates, then v2 availability/fixture."""
     apps = appearance_window(by_key, pid, before_gw)
     crowd_p = _crowd_play_prob(selected_count=selected)
     mins_info = expected_minutes_v2_from_apps(apps, crowd_p)
 
-    if form["minutes"]:
-        rates = rates_from_totals(
-            form["minutes"],
-            form["goals_scored"],
-            form["assists"],
-            form["clean_sheets"],
-            form["bonus"],
-            "2025/26",
-        )
-    elif prior:
-        rates = rates_from_totals(
+    prior_rates = (
+        rates_from_totals(
             prior["minutes"],
             prior["goals_scored"],
             prior["assists"],
@@ -336,13 +382,37 @@ def compute_v3a(etype, prior, form, by_key, pid, before_gw, selected, was_home):
             prior["bonus"],
             "2024/25",
         )
-    else:
+        if prior
+        else None
+    )
+    window = _form_as_window_totals(form)
+    rates = stable_rates_from_totals(
+        window,
+        prior_rates,
+        use_xg=use_xg,
+        fallback_counter=fallback_counter,
+    )
+    if rates is None:
         return None
 
     base = mins_info["p_play"] * _ep_from_rates(
         etype, mins_info["play_minutes"], rates
     )
     return apply_v2(base, form, was_home)
+
+
+def compute_v3a(etype, prior, form, by_key, pid, before_gw, selected, was_home, fallback_counter=None):
+    return compute_v3(
+        etype, prior, form, by_key, pid, before_gw, selected, was_home,
+        use_xg=False, fallback_counter=fallback_counter,
+    )
+
+
+def compute_v3b(etype, prior, form, by_key, pid, before_gw, selected, was_home, fallback_counter=None):
+    return compute_v3(
+        etype, prior, form, by_key, pid, before_gw, selected, was_home,
+        use_xg=True, fallback_counter=fallback_counter,
+    )
 
 
 def rates_from_totals(minutes, goals, assists, cs, bonus, season_name):

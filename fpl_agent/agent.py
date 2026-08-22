@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from fpl_agent.projections import MODEL_ERROR_MAE
 from fpl_agent.tools import TOOLS, dispatch
 
 MODEL = "claude-sonnet-4-6"
@@ -37,7 +38,13 @@ SYSTEM_TEXT = (
     "not build gap/deficit narratives on provisional standings. "
     "Never open with Yes/No if the recommendation contradicts it — lead with "
     "the recommendation itself. If the user sets an explicit length ('one line'), "
-    "comply exactly: one sentence, no headers, no tables, no bold."
+    "comply exactly: one sentence, no headers, no tables, no bold. "
+    "If two tool results carry different _meta.gw, reconcile explicitly or use "
+    "only the newer one — never mix baselines silently. "
+    f"When comparing player projections, if |delta| < {MODEL_ERROR_MAE}, describe "
+    "the choice as within model noise / a toss-up with a slight lean — never as "
+    "'wrong' or urgent. Reserve strong directives for deltas clearly exceeding "
+    "model error."
 )
 
 

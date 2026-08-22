@@ -1,4 +1,4 @@
-"""Diagnose naive / v1 / v2 / v3a / crowd projections vs 2025-26 actuals.
+"""Diagnose naive / v1 / v2 / v3a / v3b / crowd projections vs 2025-26 actuals.
 
 Reuses backtest.py replay (cached CSVs, pre-GW features). Does not impute
 missing history as zero — those player-GWs are skipped and counted.
@@ -12,14 +12,16 @@ from backtest import (
     apply_v2,
     compute_v1,
     compute_v3a,
+    compute_v3b,
     gw_pool,
     load_replay,
     rolling_totals,
 )
 from fpl_agent.data import POSITION_LABELS
 
-MODELS = ("naive", "v1", "v2", "v3a", "crowd")
-HEADLINE_MODELS = ("naive", "v1", "v2", "v3a")
+SCORE_MODELS = ("naive", "v1", "v2", "v3a", "v3b")
+MODELS = SCORE_MODELS + ("crowd",)
+INTERSECTION_MODELS = SCORE_MODELS
 HEADLINE_GW = (20, 38)
 PRICE_BANDS = (
     ("<£5.0", lambda p: p < 5.0),
@@ -74,7 +76,6 @@ def pearson(xs, ys):
 
 def spearman(pred, actual):
     """Higher pred and higher actual should correlate (we invert pred ranks)."""
-    # rankdata: 1 = smallest. For points/ownership, bigger is better → rank by -value.
     return pearson(rankdata([-p for p in pred]), rankdata([-a for a in actual]))
 
 
@@ -112,6 +113,7 @@ def collect_rows(replay):
 
     rows = []
     skips = {m: 0 for m in MODELS}
+    fallback_counts = {"v3a": 0, "v3b": 0}
     seen_gws = set()
 
     for gw in range(2, 39):
@@ -128,6 +130,7 @@ def collect_rows(replay):
             prior = prior_by_code.get(code_of.get(pid))
             form = rolling_totals(by_key, pid, gw)
             v1 = compute_v1(etype, prior, form)
+            fb = {"v3b": 0}
             preds = {
                 "naive": naive_proj(gw, prior, form),
                 "v1": v1,
@@ -135,8 +138,20 @@ def collect_rows(replay):
                 "v3a": compute_v3a(
                     etype, prior, form, by_key, pid, gw, b["selected"], b["was_home"]
                 ),
+                "v3b": compute_v3b(
+                    etype,
+                    prior,
+                    form,
+                    by_key,
+                    pid,
+                    gw,
+                    b["selected"],
+                    b["was_home"],
+                    fallback_counter=fb,
+                ),
                 "crowd": float(b["selected"]) if b["selected"] is not None else None,
             }
+            fallback_counts["v3b"] += fb.get("v3b", 0)
             for model, val in preds.items():
                 if val is None:
                     skips[model] += 1
@@ -156,7 +171,7 @@ def collect_rows(replay):
     expected = set(range(2, last_gw + 1))
     for gw in sorted(expected - seen_gws):
         print(f"Warning: GW{gw} missing from dataset, continuing")
-    return rows, skips
+    return rows, skips, fallback_counts
 
 
 def universe(rows, played_only):
@@ -184,7 +199,6 @@ def rank_errors(rows, model):
             continue
         pred = [r["pred"][model] for r in gw_rows]
         actual = [r["actual"] for r in gw_rows]
-        # 1 = highest value
         pred_rank = rankdata([-p for p in pred])
         act_rank = rankdata([-a for a in actual])
         for pr, ar in zip(pred_rank, act_rank):
@@ -244,20 +258,59 @@ def intersection_rows(rows, models, gw_range=None, played_only=False):
     return out
 
 
-def print_headline(rows):
-    """Intersection universe, GW20–38, mins>0: MAE and P@11."""
-    subset = intersection_rows(
-        rows, HEADLINE_MODELS, gw_range=HEADLINE_GW, played_only=True
-    )
-    print("=== Headline (intersection universe, GW20–38, mins>0) ===")
-    print(f"n={len(subset)} player-GWs where {', '.join(HEADLINE_MODELS)} all score")
-    hdr = f"{'model':<8} {'MAE':>8} {'P@11':>8}"
+def model_metrics(rows, model):
+    mae, bias = mae_bias(point_errors(rows, model))
+    rho, _ = gw_spearman(rows, model)
+    p11, _ = gw_precision(rows, model)
+    return {"mae": mae, "bias": bias, "spearman": rho, "p11": p11}
+
+
+def print_intersection_table(title, rows, models, gw_range, played_only):
+    subset = intersection_rows(rows, models, gw_range=gw_range, played_only=played_only)
+    lo, hi = gw_range
+    filt = "mins>0" if played_only else "all fixtures"
+    print(f"=== {title} (intersection, GW{lo}–{hi}, {filt}) ===")
+    print(f"n={len(subset)} player-GWs where {', '.join(models)} all score")
+    hdr = f"{'model':<8} {'MAE':>8} {'bias':>8} {'Spearman':>8} {'P@11':>8}"
     print(hdr)
     print("-" * len(hdr))
-    for model in HEADLINE_MODELS:
-        mae, _ = mae_bias(point_errors(subset, model))
-        p11, _ = gw_precision(subset, model)
-        print(f"{model:<8} {fmt(mae)} {fmt(p11)}")
+    for model in models:
+        m = model_metrics(subset, model)
+        print(
+            f"{model:<8} {fmt(m['mae'])} {fmt(m['bias'])} "
+            f"{fmt(m['spearman'])} {fmt(m['p11'])}"
+        )
+    print()
+    return subset
+
+
+def print_verdict(rows):
+    """Mechanical PASS/FAIL: v3a/v3b vs v2 on GW20–38 mins>0 intersection."""
+    subset = intersection_rows(
+        rows, INTERSECTION_MODELS, gw_range=HEADLINE_GW, played_only=True
+    )
+    baseline = model_metrics(subset, "v2")
+    print("=== Verdict (v3a/v3b vs v2, GW20–38 mins>0 intersection) ===")
+    for challenger in ("v3a", "v3b"):
+        m = model_metrics(subset, challenger)
+        mae_ok = m["mae"] is not None and baseline["mae"] is not None and m["mae"] < baseline["mae"]
+        p11_ok = m["p11"] is not None and baseline["p11"] is not None and m["p11"] > baseline["p11"]
+        passed = mae_ok and p11_ok
+        mae_delta = (
+            m["mae"] - baseline["mae"]
+            if m["mae"] is not None and baseline["mae"] is not None
+            else None
+        )
+        p11_delta = (
+            m["p11"] - baseline["p11"]
+            if m["p11"] is not None and baseline["p11"] is not None
+            else None
+        )
+        verdict = "PASS" if passed else "FAIL"
+        print(
+            f"{challenger} vs v2: {verdict} "
+            f"(ΔMAE={fmt(mae_delta)}, ΔP@11={fmt(p11_delta)})"
+        )
     print()
 
 
@@ -358,13 +411,42 @@ def print_worst_players(rows):
 def main():
     replay = load_replay()
     print(f"Loaded {replay['n_rows']} GW rows through GW{replay['max_gw']}")
-    rows, skips = collect_rows(replay)
+    rows, skips, fallback_counts = collect_rows(replay)
     print(f"Player-GWs with a fixture: {len(rows)}")
     print()
-    print_headline(rows)
+
+    print_intersection_table(
+        "Headline",
+        rows,
+        INTERSECTION_MODELS,
+        gw_range=HEADLINE_GW,
+        played_only=True,
+    )
+    print_intersection_table(
+        "Secondary (early season)",
+        rows,
+        INTERSECTION_MODELS,
+        gw_range=(2, 19),
+        played_only=True,
+    )
+    print_intersection_table(
+        "Secondary (full season)",
+        rows,
+        INTERSECTION_MODELS,
+        gw_range=(2, 38),
+        played_only=True,
+    )
+
     print_summary(rows, skips)
     print_segments(rows)
     print_worst_players(rows)
+
+    print("=== xG fallback counts (realized attack rates used) ===")
+    print(f"v3a: {fallback_counts['v3a']}")
+    print(f"v3b: {fallback_counts['v3b']}")
+    print()
+
+    print_verdict(rows)
 
 
 if __name__ == "__main__":

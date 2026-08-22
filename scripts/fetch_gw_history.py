@@ -5,16 +5,31 @@ import _bootstrap  # noqa: F401
 import argparse
 import json
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 from backtest import SEASON, cache_csv, index_merged, load_csv, sum_rows, unique_fixture_rows
-from backtest import _to_int
+from backtest import _to_float, _to_int
 from fpl_agent.data import load_snapshot
 
 OUT_DIR = Path("data/season")
 PER_GW_PATH = OUT_DIR / "per_gw_2025-26.json"
 UNMATCHED_PATH = OUT_DIR / "unmatched.txt"
+XGC_COLS = ("expected_goals", "expected_assists", "expected_goal_involvements")
+
+
+def _require_xgc_columns(fieldnames):
+    if not fieldnames:
+        print("merged_gw.csv has no column headers")
+        sys.exit(1)
+    missing = [col for col in XGC_COLS if col not in fieldnames]
+    if missing:
+        print(f"merged_gw.csv missing required columns: {missing}")
+        print("Actual columns:")
+        for col in fieldnames:
+            print(f"  {col}")
+        sys.exit(1)
 
 
 def _norm_name(value):
@@ -38,6 +53,11 @@ def _gw_stats(rows):
         "points": sum_rows(uniq, "total_points"),
         "goals": sum_rows(uniq, "goals_scored"),
         "assists": sum_rows(uniq, "assists"),
+        "expected_goals": round(sum_rows(uniq, "expected_goals", _to_float), 2),
+        "expected_assists": round(sum_rows(uniq, "expected_assists", _to_float), 2),
+        "expected_goal_involvements": round(
+            sum_rows(uniq, "expected_goal_involvements", _to_float), 2
+        ),
     }
 
 
@@ -123,6 +143,20 @@ def _write_unmatched(unmatched, stats):
     UNMATCHED_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _print_haaland_sanity(per_gw, elements):
+    haaland = next((p for p in elements if p.get("web_name") == "Haaland"), None)
+    if haaland is None:
+        print("Sanity — Haaland: not found in bootstrap catalogue")
+        return
+    history = per_gw.get(str(haaland["id"]))
+    if not history:
+        print("Sanity — Haaland: no per-GW history in output")
+        return
+    total_xg = round(sum(gw.get("expected_goals", 0.0) for gw in history.values()), 2)
+    total_goals = sum(gw.get("goals", 0) for gw in history.values())
+    print(f"Sanity — Haaland: season xG={total_xg} vs goals={total_goals}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build per-GW player actuals from vaastav merged_gw.csv"
@@ -138,6 +172,7 @@ def main():
     merged_path = cache_csv(f"{SEASON}/gws/merged_gw.csv")
     raw_path = cache_csv(f"{SEASON}/players_raw.csv")
     merged_rows = load_csv(merged_path)
+    _require_xgc_columns(merged_rows[0].keys() if merged_rows else None)
     raw_rows = load_csv(raw_path)
 
     snap = load_snapshot(args.gw)
@@ -210,6 +245,8 @@ def main():
             + "\n",
             encoding="utf-8",
         )
+
+    _print_haaland_sanity(per_gw, elements)
 
 
 if __name__ == "__main__":
