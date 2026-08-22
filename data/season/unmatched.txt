@@ -1,0 +1,123 @@
+# Bootstrap players with no usable merged_gw.csv history
+# season=2025-26 bootstrap=587 matched=467 (code=459, name=8) unmatched=120 match_rate=79.6%
+
+279	Ajayi	Hull City	not in vaastav CSV
+296	Akintola	Hull City	not in vaastav CSV
+320	Akpom	Ipswich Town	not in vaastav CSV
+322	Al-Hamadi	Ipswich Town	not in vaastav CSV
+182	Amenda	Coventry City	not in vaastav CSV
+192	Andrews	Coventry City	not in vaastav CSV
+579	Araujo	Liverpool	not in vaastav CSV
+559	Bamba	Newcastle	not in vaastav CSV
+568	Barco	Chelsea	not in vaastav CSV
+197	Bassette	Coventry City	not in vaastav CSV
+286	Belloumi	Hull City	not in vaastav CSV
+178	Bidwell	Coventry City	not in vaastav CSV
+479	Bindon	Nott'm Forest	not in vaastav CSV
+191	Borges Rodrigues	Coventry City	not in vaastav CSV
+181	Brau	Coventry City	not in vaastav CSV
+311	Burns	Ipswich Town	not in vaastav CSV
+299	Burstow	Hull City	not in vaastav CSV
+274	Butland	Hull City	not in vaastav CSV
+302	Button	Ipswich Town	not in vaastav CSV
+275	Cartwright	Hull City	not in vaastav CSV
+580	Charles	Fulham	not in vaastav CSV
+583	Chavarria	Chelsea	not in vaastav CSV
+119	Costinha	Brighton	not in vaastav CSV
+280	Coyle	Hull City	not in vaastav CSV
+289	Crooks	Hull City	not in vaastav CSV
+305	Davis	Ipswich Town	not in vaastav CSV
+298	Destan	Hull City	not in vaastav CSV
+581	Diomande	Nott'm Forest	not in vaastav CSV
+171	Dovin	Coventry City	not in vaastav CSV
+288	Dowell	Hull City	not in vaastav CSV
+281	Drameh	Hull City	not in vaastav CSV
+187	Eccles	Coventry City	not in vaastav CSV
+277	Egan	Hull City	not in vaastav CSV
+170	Emegha	Chelsea	not in vaastav CSV
+316	Emersonn	Ipswich Town	not in vaastav CSV
+315	Fatawu	Ipswich Town	not in vaastav CSV
+308	Furlong	Ipswich Town	not in vaastav CSV
+282	Giles	Hull City	not in vaastav CSV
+569	Gonzalo	Fulham	not in vaastav CSV
+306	Greaves	Ipswich Town	not in vaastav CSV
+184	Grimes	Coventry City	not in vaastav CSV
+247	Hackney	Everton	not in vaastav CSV
+584	Hamer	Coventry City	not in vaastav CSV
+585	Herrington	Hull City	not in vaastav CSV
+317	Hirst	Ipswich Town	not in vaastav CSV
+574	Hjertø-Dahl	Hull City	not in vaastav CSV
+567	Horníček	Newcastle	not in vaastav CSV
+283	Jacob	Hull City	not in vaastav CSV
+362	Jacquet	Liverpool	not in vaastav CSV
+444	Jaouen	Newcastle	not in vaastav CSV
+354	Jaros	Liverpool	not in vaastav CSV
+307	Johnson	Ipswich Town	ambiguous name in vaastav CSV
+177	Kesler-Hayden	Coventry City	not in vaastav CSV
+303	Kipré	Ipswich Town	not in vaastav CSV
+174	Kitching	Coventry City	not in vaastav CSV
+381	Koumas	Liverpool	not in vaastav CSV
+179	Latibeaudiere	Coventry City	not in vaastav CSV
+276	Lo-Tutala	Hull City	not in vaastav CSV
+582	Madjo	Aston Villa	not in vaastav CSV
+562	Maeda	Ipswich Town	not in vaastav CSV
+53	Manzambi	Aston Villa	not in vaastav CSV
+196	Markelo	Coventry City	not in vaastav CSV
+186	Mason-Clark	Coventry City	not in vaastav CSV
+291	Matazo	Hull City	not in vaastav CSV
+310	Matusiwa	Ipswich Town	not in vaastav CSV
+323	McAteer	Ipswich Town	not in vaastav CSV
+295	McBurnie	Hull City	not in vaastav CSV
+284	McCarthy	Hull City	not in vaastav CSV
+285	McNair	Hull City	not in vaastav CSV
+324	Mehmeti	Ipswich Town	not in vaastav CSV
+586	Mendy	Hull City	not in vaastav CSV
+541	Meunier	Sunderland	not in vaastav CSV
+287	Millar	Hull City	not in vaastav CSV
+207	Mingueza	Crystal Palace	not in vaastav CSV
+410	Monga	Man City	not in vaastav CSV
+563	Morita	Hull City	not in vaastav CSV
+334	Muharemović	Leeds	not in vaastav CSV
+377	Munoz	Liverpool	not in vaastav CSV
+39	Nedeljkovic	Aston Villa	not in vaastav CSV
+309	Núñez	Ipswich Town	not in vaastav CSV
+304	O'Shea	Ipswich Town	not in vaastav CSV
+314	Ogbene	Ipswich Town	not in vaastav CSV
+570	Palacios	Fulham	not in vaastav CSV
+152	Palestra	Chelsea	not in vaastav CSV
+273	Phillips	Hull City	ambiguous name in vaastav CSV
+318	Philogene	Ipswich Town	not in vaastav CSV
+164	Quenda	Chelsea	not in vaastav CSV
+81	Rodríguez	Bournemouth	not in vaastav CSV
+183	Rudoni	Coventry City	not in vaastav CSV
+587	Rulli	Man City	not in vaastav CSV
+185	Sakamoto	Coventry City	not in vaastav CSV
+573	Sanchez	Bournemouth	not in vaastav CSV
+558	Schlager	Nott'm Forest	not in vaastav CSV
+93	Schuster	Brentford	not in vaastav CSV
+189	Shepherd	Coventry City	not in vaastav CSV
+566	Silva	Bournemouth	not in vaastav CSV
+195	Simms	Coventry City	not in vaastav CSV
+462	Steur	Newcastle	not in vaastav CSV
+576	Stroud	Hull City	not in vaastav CSV
+120	Svoboda	Brighton	not in vaastav CSV
+319	Szmodics	Ipswich Town	not in vaastav CSV
+312	Taylor	Ipswich Town	not in vaastav CSV
+173	Thomas	Coventry City	not in vaastav CSV
+194	Thomas-Asante	Coventry City	not in vaastav CSV
+577	Tomiyasu	Crystal Palace	not in vaastav CSV
+188	Torp	Coventry City	not in vaastav CSV
+461	Touré	Newcastle	not in vaastav CSV
+572	Tzolakis	Hull City	not in vaastav CSV
+557	Tzolis	Arsenal	not in vaastav CSV
+554	Van Oevelen	Ipswich Town	not in vaastav CSV
+321	Walle Egeli	Ipswich Town	not in vaastav CSV
+300	Walton	Ipswich Town	not in vaastav CSV
+172	Wilson	Coventry City	ambiguous name in vaastav CSV
+180	Woolfenden	Coventry City	not in vaastav CSV
+193	Wright	Coventry City	ambiguous name in vaastav CSV
+575	Yirenkyi	Coventry City	not in vaastav CSV
+135	Yohanna	Brighton	not in vaastav CSV
+294	Zambrano	Hull City	not in vaastav CSV
+175	van Ewijk	Coventry City	not in vaastav CSV
+292	Ömür	Hull City	not in vaastav CSV

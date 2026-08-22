@@ -13,7 +13,12 @@ import requests
 
 from fpl_data import POSITION_LABELS
 from fpl_optimize import MIN_IN_XI, MAX_IN_XI, best_squad, best_xi
-from fpl_projections import _ep_from_rates, per_90_rates
+from fpl_projections import (
+    _crowd_play_prob,
+    _ep_from_rates,
+    expected_minutes_v2_from_apps,
+    per_90_rates,
+)
 
 # xP is FPL's ep_this scraped after the GW; it may include post-match
 # info. We still use it as the official-model benchmark, as requested,
@@ -112,6 +117,12 @@ def gw_bundle(rows):
     n_raw = len(rows)
     uniq = unique_fixture_rows(rows)
     first = uniq[0]
+    has_starts = any(r.get("starts") not in (None, "") for r in uniq)
+    minutes = sum_rows(uniq, "minutes")
+    if has_starts:
+        starts = sum_rows(uniq, "starts")
+    else:
+        starts = sum(1 for r in uniq if _to_int(r.get("minutes")) >= 60)
     return {
         "name": first.get("name") or "",
         "position": first.get("position") or "",
@@ -120,7 +131,8 @@ def gw_bundle(rows):
         "was_home": _is_true(first.get("was_home")),
         "selected": _to_int(first.get("selected")),
         "points": sum_rows(uniq, "total_points"),
-        "minutes": sum_rows(uniq, "minutes"),
+        "minutes": minutes,
+        "starts": starts,
         "goals_scored": sum_rows(uniq, "goals_scored"),
         "assists": sum_rows(uniq, "assists"),
         "clean_sheets": sum_rows(uniq, "clean_sheets"),
@@ -281,6 +293,54 @@ def apply_v2(v1, form, was_home):
         avail = 0.25
     fixture_adj = 1.08 if was_home else 0.95
     return blended * avail * fixture_adj
+
+
+def appearance_window(by_key, pid, before_gw, window=10):
+    """Last N appearances (minutes>0) before before_gw."""
+    apps = []
+    for gw in range(before_gw - 1, 0, -1):
+        rows = by_key.get((pid, gw))
+        if not rows:
+            continue
+        bundle = gw_bundle(rows)
+        if bundle["minutes"] > 0:
+            apps.append({"starts": bundle["starts"], "minutes": bundle["minutes"]})
+            if len(apps) >= window:
+                break
+    return apps
+
+
+def compute_v3a(etype, prior, form, by_key, pid, before_gw, selected, was_home):
+    """v3a: appearance p_play × unshrunk form rates, then v2 availability/fixture."""
+    apps = appearance_window(by_key, pid, before_gw)
+    crowd_p = _crowd_play_prob(selected_count=selected)
+    mins_info = expected_minutes_v2_from_apps(apps, crowd_p)
+
+    if form["minutes"]:
+        rates = rates_from_totals(
+            form["minutes"],
+            form["goals_scored"],
+            form["assists"],
+            form["clean_sheets"],
+            form["bonus"],
+            "2025/26",
+        )
+    elif prior:
+        rates = rates_from_totals(
+            prior["minutes"],
+            prior["goals_scored"],
+            prior["assists"],
+            prior["clean_sheets"],
+            prior["bonus"],
+            "2024/25",
+        )
+    else:
+        return None
+
+    base = mins_info["p_play"] * _ep_from_rates(
+        etype, mins_info["play_minutes"], rates
+    )
+    return apply_v2(base, form, was_home)
 
 
 def rates_from_totals(minutes, goals, assists, cs, bonus, season_name):

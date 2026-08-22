@@ -1,4 +1,4 @@
-"""Diagnose naive / v1 / v2 / crowd projections vs 2025-26 actuals.
+"""Diagnose naive / v1 / v2 / v3a / crowd projections vs 2025-26 actuals.
 
 Reuses backtest.py replay (cached CSVs, pre-GW features). Does not impute
 missing history as zero — those player-GWs are skipped and counted.
@@ -9,13 +9,16 @@ from collections import defaultdict
 from backtest import (
     apply_v2,
     compute_v1,
+    compute_v3a,
     gw_pool,
     load_replay,
     rolling_totals,
 )
 from fpl_data import POSITION_LABELS
 
-MODELS = ("naive", "v1", "v2", "crowd")
+MODELS = ("naive", "v1", "v2", "v3a", "crowd")
+HEADLINE_MODELS = ("naive", "v1", "v2", "v3a")
+HEADLINE_GW = (20, 38)
 PRICE_BANDS = (
     ("<£5.0", lambda p: p < 5.0),
     ("£5.0–7.5", lambda p: 5.0 <= p < 7.5),
@@ -127,6 +130,9 @@ def collect_rows(replay):
                 "naive": naive_proj(gw, prior, form),
                 "v1": v1,
                 "v2": apply_v2(v1, form, b["was_home"]),
+                "v3a": compute_v3a(
+                    etype, prior, form, by_key, pid, gw, b["selected"], b["was_home"]
+                ),
                 "crowd": float(b["selected"]) if b["selected"] is not None else None,
             }
             for model, val in preds.items():
@@ -221,6 +227,36 @@ def fmt(val, nd=3):
     if val is None:
         return f"{'—':>8}"
     return f"{val:>8.{nd}f}"
+
+
+def intersection_rows(rows, models, gw_range=None, played_only=False):
+    lo, hi = gw_range or (2, 38)
+    out = []
+    for r in rows:
+        if not (lo <= r["gw"] <= hi):
+            continue
+        if played_only and r["minutes"] <= 0:
+            continue
+        if all(r["pred"].get(m) is not None for m in models):
+            out.append(r)
+    return out
+
+
+def print_headline(rows):
+    """Intersection universe, GW20–38, mins>0: MAE and P@11."""
+    subset = intersection_rows(
+        rows, HEADLINE_MODELS, gw_range=HEADLINE_GW, played_only=True
+    )
+    print("=== Headline (intersection universe, GW20–38, mins>0) ===")
+    print(f"n={len(subset)} player-GWs where {', '.join(HEADLINE_MODELS)} all score")
+    hdr = f"{'model':<8} {'MAE':>8} {'P@11':>8}"
+    print(hdr)
+    print("-" * len(hdr))
+    for model in HEADLINE_MODELS:
+        mae, _ = mae_bias(point_errors(subset, model))
+        p11, _ = gw_precision(subset, model)
+        print(f"{model:<8} {fmt(mae)} {fmt(p11)}")
+    print()
 
 
 def print_summary(rows, skips):
@@ -323,6 +359,7 @@ def main():
     rows, skips = collect_rows(replay)
     print(f"Player-GWs with a fixture: {len(rows)}")
     print()
+    print_headline(rows)
     print_summary(rows, skips)
     print_segments(rows)
     print_worst_players(rows)
