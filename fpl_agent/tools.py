@@ -460,6 +460,8 @@ def get_rivals(league_id=None, top_n=10):
 
     standings_data = _fetch_league_standings(league_id)
     results = standings_data.get("standings", {}).get("results") or []
+    league_size = len(results)
+    partial = context.get("gw_state") == "in_progress"
     standings = [
         {
             "entry_id": row["entry"],
@@ -467,6 +469,7 @@ def get_rivals(league_id=None, top_n=10):
             "player_name": row.get("player_name") or "",
             "total_points": row.get("total"),
             "rank": row.get("rank"),
+            "partial": partial,
         }
         for row in results[:top_n]
     ]
@@ -523,7 +526,7 @@ def get_rivals(league_id=None, top_n=10):
     else:
         my_ids = {p["element"] for p in my_picks_data.get("picks") or []}
 
-    denom = sampled or 1
+    sample_size = sampled
     ownership_in_league = []
     for pid, count in ownership_counts.most_common():
         p = players.get(pid)
@@ -531,31 +534,33 @@ def get_rivals(league_id=None, top_n=10):
             {
                 "id": pid,
                 "name": p["web_name"] if p else str(pid),
-                "owned_count": count,
-                "owned_pct": round(100.0 * count / denom, 1),
+                "owned_by": count,
+                "sample_size": sample_size,
             }
         )
+
+    diff_threshold = sample_size * 0.3 if sample_size else 0
+    threat_threshold = sample_size * 0.5 if sample_size else 0
 
     my_differentials = []
     for pid in sorted(my_ids):
         if pid not in players:
             continue
-        count = ownership_counts.get(pid, 0)
-        pct = round(100.0 * count / denom, 1)
-        if pct < 30.0:
+        owned_by = ownership_counts.get(pid, 0)
+        if owned_by < diff_threshold:
             my_differentials.append(
                 {
                     "id": pid,
                     "name": players[pid]["web_name"],
-                    "owned_count": count,
-                    "owned_pct": pct,
+                    "owned_by": owned_by,
+                    "sample_size": sample_size,
                 }
             )
 
     threats = [
         row
         for row in ownership_in_league
-        if row["id"] not in my_ids and row["owned_pct"] > 50.0
+        if row["id"] not in my_ids and row["owned_by"] > threat_threshold
     ]
 
     captain_spread = []
@@ -565,8 +570,8 @@ def get_rivals(league_id=None, top_n=10):
             {
                 "captain_id": pid,
                 "captain_name": p["web_name"] if p else str(pid),
-                "count": count,
-                "pct": round(100.0 * count / denom, 1),
+                "captained_by": count,
+                "sample_size": sample_size,
             }
         )
 
@@ -576,13 +581,14 @@ def get_rivals(league_id=None, top_n=10):
         "my_rank": my_rank,
         "classic_leagues": catalog,
         "locked_gw": locked_gw,
+        "league_size": league_size,
+        "sample_size": sample_size,
         "top_n": top_n,
         "standings": standings,
-        "rivals_sampled": sampled,
         "fetch_failures": fetch_failures,
         "ownership_in_league": ownership_in_league,
-        "my_differentials": sorted(my_differentials, key=lambda r: r["owned_pct"]),
-        "threats": sorted(threats, key=lambda r: -r["owned_pct"]),
+        "my_differentials": sorted(my_differentials, key=lambda r: r["owned_by"]),
+        "threats": sorted(threats, key=lambda r: -r["owned_by"]),
         "captain_spread": captain_spread,
         **context,
     }
