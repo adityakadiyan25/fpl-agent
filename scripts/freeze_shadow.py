@@ -44,10 +44,25 @@ def _projected_score(xi_ids, captain_id, proj):
     return sum(proj[i]["ep"] for i in xi_ids) + proj[captain_id]["ep"]
 
 
+def _gw_deadline(bootstrap, gw):
+    """UTC deadline for this gameweek, or None if not in bootstrap events."""
+    events = bootstrap.get("events") or []
+    ev = next((e for e in events if e.get("id") == gw), None)
+    iso = ev.get("deadline_time") if ev else None
+    if not iso:
+        return None
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Freeze optimal shadow squad for a GW")
     parser.add_argument("--gw", type=int, required=True, help="Gameweek number")
     parser.add_argument("--model", choices=MODELS, default="v2")
+    parser.add_argument(
+        "--early",
+        action="store_true",
+        help="allow sealing more than 48 hours before the GW deadline",
+    )
     args = parser.parse_args()
 
     out_dir = Path("snapshots") / f"gw{args.gw}"
@@ -60,6 +75,16 @@ def main():
         sys.exit(1)
 
     snap = load_snapshot(args.gw)
+    now = datetime.now(timezone.utc)
+    deadline = _gw_deadline(snap["bootstrap"], args.gw)
+    hours_to_deadline = None
+    if deadline is not None:
+        hours_to_deadline = (deadline - now).total_seconds() / 3600.0
+        if hours_to_deadline > 48 and not args.early:
+            h = round(hours_to_deadline, 1)
+            print(f"EARLY SEAL BLOCKED — {h} hours to deadline. Rerun with --early to override.")
+            sys.exit(1)
+
     players = build_players(snap["bootstrap"])
     history = load_history(args.gw)
     proj = project(players, history, snap["fixtures"], args.model)
@@ -112,7 +137,15 @@ def main():
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     cap_name = players[captain_id]["web_name"]
-    print(f"Shadow GW{args.gw} frozen: {cap_name} (C), projected {score:.1f}, at {created_at}")
+    hours_part = (
+        f", {hours_to_deadline:.1f}h to deadline"
+        if hours_to_deadline is not None
+        else ""
+    )
+    print(
+        f"Shadow GW{args.gw} frozen: {cap_name} (C), projected {score:.1f}"
+        f"{hours_part}, at {created_at}"
+    )
 
 
 if __name__ == "__main__":
