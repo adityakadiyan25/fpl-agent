@@ -22,7 +22,9 @@ def _load(gw):
     players = build_players(snap["bootstrap"])
     history = load_history(gw)
     picks = load_my_picks(gw)
-    by_model = {m: project(players, history, snap["fixtures"], m) for m in MODELS}
+    by_model = {
+        m: project(players, history, snap["fixtures"], m, before_gw=gw) for m in MODELS
+    }
     return snap, players, history, picks, by_model
 
 

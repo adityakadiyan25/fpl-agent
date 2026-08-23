@@ -1,6 +1,7 @@
 """Expected-points models: v0–v2, v3a/v3b (appearance-weighted minutes engine)."""
 
 import json
+import sys
 from pathlib import Path
 
 LAST_SEASON = "2025/26"
@@ -84,8 +85,8 @@ def expected_minutes(player, history):
     return min(90.0, (last.get("minutes") or 0) / 38.0)
 
 
-def fixture_adjustment(player, fixtures, teams=None, target_gw=1):
-    """FDR multiplier for target_gw (summed if a double). Unmatched → 1.0."""
+def fixture_adjustment(player, fixtures, *, target_gw, teams=None):
+    """FDR multiplier for target_gw (summed if a double). Unmatched → 0.0 (blank GW)."""
     _ = teams
     team_id = player["team"]
     matched = [
@@ -96,8 +97,8 @@ def fixture_adjustment(player, fixtures, teams=None, target_gw=1):
     ]
     if not matched:
         name = player.get("web_name") or f"id={player.get('id')}"
-        print(f"Warning: no GW{target_gw} fixture matched for {name}")
-        return 1.0
+        print(f"Warning: no GW{target_gw} fixture matched for {name}", file=sys.stderr)
+        return 0.0
     adj = 0.0
     for fx in matched:
         fdr = fx["team_h_difficulty"] if fx["team_h"] == team_id else fx["team_a_difficulty"]
@@ -426,7 +427,7 @@ def _pack(ep_by_id, flags):
     }
 
 
-def project(players, history, fixtures, model, before_gw=1, per_gw_history=None):
+def project(players, history, fixtures, model, *, before_gw, per_gw_history=None):
     """Return {player_id: {ep, low_confidence}} for v0–v3b."""
     flags = _low_confidence_flags(players, history)
 
@@ -463,6 +464,20 @@ def _leakage_self_test():
     raise AssertionError("assert_pre_gw failed to catch GW >= target")
 
 
+def _fixture_targeting_self_test():
+    fixtures = [
+        {"event": 1, "team_h": 10, "team_a": 20, "team_h_difficulty": 5, "team_a_difficulty": 2},
+        {"event": 2, "team_h": 30, "team_a": 10, "team_h_difficulty": 3, "team_a_difficulty": 4},
+        {"event": 2, "team_h": 10, "team_a": 40, "team_h_difficulty": 2, "team_a_difficulty": 3},
+    ]
+    player = {"id": 1, "team": 10, "web_name": "TestPlayer"}
+    assert fixture_adjustment(player, fixtures, target_gw=1) == FDR_MULT[5]
+    assert fixture_adjustment(player, fixtures, target_gw=2) == FDR_MULT[4] + FDR_MULT[2]
+    assert fixture_adjustment(player, fixtures, target_gw=3) == 0.0
+
+
 if __name__ == "__main__":
     _leakage_self_test()
     print("leakage self-test: OK")
+    _fixture_targeting_self_test()
+    print("fixture targeting self-test: OK")

@@ -87,7 +87,7 @@ def main():
 
     players = build_players(snap["bootstrap"])
     history = load_history(args.gw)
-    proj = project(players, history, snap["fixtures"], args.model)
+    proj = project(players, history, snap["fixtures"], args.model, before_gw=args.gw)
 
     squad_ids = sorted(
         best_squad(proj, players, max_low_confidence=MAX_LOW_CONFIDENCE),

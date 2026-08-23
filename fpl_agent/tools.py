@@ -642,7 +642,7 @@ def get_my_squad():
 def project_points(model="v2"):
     snap, players, history, picks = _ctx()
     model = _model({"model": model})
-    proj = project(players, history, snap["fixtures"], model)
+    proj = project(players, history, snap["fixtures"], model, before_gw=snap["gw"])
 
     mine = []
     for pick in picks:
@@ -680,7 +680,7 @@ def project_points(model="v2"):
 def optimize_squad(model="v2"):
     snap, players, history, picks = _ctx()
     model = _model({"model": model})
-    proj = project(players, history, snap["fixtures"], model)
+    proj = project(players, history, snap["fixtures"], model, before_gw=snap["gw"])
 
     squad_ids = best_squad(proj, players)
     xi_ids, captain = best_xi(squad_ids, proj, players)
@@ -710,7 +710,7 @@ def optimize_squad(model="v2"):
 
 def audit_squad():
     snap, players, history, picks = _ctx()
-    proj = project(players, history, snap["fixtures"], "v2")
+    proj = project(players, history, snap["fixtures"], "v2", before_gw=snap["gw"])
     context = _build_gw_context(snap["bootstrap"])
     warnings = []
 
@@ -802,7 +802,7 @@ def get_fixtures(gw=None):
 def suggest_transfers(model="v2", min_gain=1.0):
     snap, players, history, picks = _ctx()
     model = _model({"model": model})
-    proj = project(players, history, snap["fixtures"], model)
+    proj = project(players, history, snap["fixtures"], model, before_gw=snap["gw"])
     bank = load_my_bank(snap["gw"])
     return {
         "gw": snap["gw"],
