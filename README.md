@@ -45,8 +45,10 @@ Builds `snapshots/gwN/my_team.json` from the public picks for GW N−1 (reconstr
 ### 3. History (optional, for v1+ models)
 
 ```bash
-python3 scripts/fetch_history.py
+python3 scripts/fetch_history.py --gw 2
 ```
+
+`--gw` is required. Output goes to `snapshots/gwN/history_past.json` and now includes `saves` and `defensive_contribution` for DefCon/save scoring. Re-fetch per GW snapshot (`--force` to refresh an existing file; GW1's stays frozen without `--force`).
 
 ### 4. Shadow envelope (pre-register optimal squad)
 

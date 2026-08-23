@@ -1,6 +1,7 @@
 """Expected-points models: v0–v2, v3a/v3b (appearance-weighted minutes engine)."""
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -8,6 +9,9 @@ LAST_SEASON = "2025/26"
 PER_GW_PATH = Path("data/season/per_gw_2025-26.json")
 GOAL_POINTS = {1: 6, 2: 6, 3: 5, 4: 4}
 CS_POINTS = {1: 4, 2: 4, 3: 1, 4: 0}
+SAVES_PER_POINT = 3.0
+DEFCON_POINTS = 2
+DEFCON_THRESHOLD = {1: None, 2: 10, 3: 12, 4: 12}  # GK ineligible
 # FDR 1 (easy) → boost; FDR 5 (hard) → haircut. FDR already encodes home/away.
 FDR_MULT = {1: 1.20, 2: 1.10, 3: 1.00, 4: 0.90, 5: 0.80}
 # Ownership at which the crowd floor reaches full ep_next / p_play
@@ -55,6 +59,33 @@ def _p90(count, minutes):
     return 90.0 * float(count) / minutes
 
 
+def _poisson_tail(lam, t):
+    """P(N >= t) for N ~ Poisson(lam), exact cumulative pmf."""
+    if t <= 0:
+        return 1.0
+    if lam <= 0:
+        return 0.0
+    p = math.exp(-lam)
+    cdf = p
+    for k in range(1, t):
+        p *= lam / k
+        cdf += p
+    return max(0.0, 1.0 - cdf)
+
+
+def _defcon_pts_p90(element_type, defcon_p90):
+    """Expected DefCon points per 90 from last-season action rate.
+
+    Biases: (a) real per-match counts are over-dispersed vs Poisson, so sub-threshold
+    tails are conservative; (b) count basis uses last season's position classification,
+    so reclassified players carry a small mismatch. Calibration deferred to live grading.
+    """
+    threshold = DEFCON_THRESHOLD.get(element_type)
+    if threshold is None or defcon_p90 <= 0:
+        return 0.0
+    return DEFCON_POINTS * _poisson_tail(defcon_p90, threshold)
+
+
 def per_90_rates(history):
     """Per-90 goals/assists/CS/bonus from one player's history_past list.
 
@@ -74,6 +105,8 @@ def per_90_rates(history):
         "assists_p90": _p90(last.get("assists") or 0, minutes) or 0.0,
         "cs_p90": _p90(last.get("clean_sheets") or 0, minutes) or 0.0,
         "bonus_p90": _p90(last.get("bonus") or 0, minutes) or 0.0,
+        "saves_p90": _p90(last.get("saves") or 0, minutes) or 0.0,
+        "defcon_p90": _p90(last.get("defensive_contribution") or 0, minutes) or 0.0,
     }
 
 
@@ -324,6 +357,9 @@ def _ep_from_rates(element_type, exp_mins, rates):
         + rates["assists_p90"] * 3
         + rates["cs_p90"] * CS_POINTS[element_type]
         + rates["bonus_p90"]
+        + _defcon_pts_p90(element_type, rates.get("defcon_p90", 0.0))
+        # Per-match floor(saves/3) makes the linear rate an upper bound; accepted for now.
+        + rates.get("saves_p90", 0.0) / SAVES_PER_POINT
     )
     return (exp_mins / 90.0) * per90
 
@@ -476,8 +512,45 @@ def _fixture_targeting_self_test():
     assert fixture_adjustment(player, fixtures, target_gw=3) == 0.0
 
 
+def _scoring_self_test():
+    legacy = {
+        "goals_p90": 0.1,
+        "assists_p90": 0.05,
+        "cs_p90": 0.2,
+        "bonus_p90": 0.1,
+    }
+    et = 2
+    exp_mins = 90.0
+    old_hand = (
+        2
+        + legacy["goals_p90"] * GOAL_POINTS[et]
+        + legacy["assists_p90"] * 3
+        + legacy["cs_p90"] * CS_POINTS[et]
+        + legacy["bonus_p90"]
+    )
+    assert abs(_ep_from_rates(et, exp_mins, legacy) - old_hand) < 1e-9
+
+    gk_base = {"goals_p90": 0.0, "assists_p90": 0.0, "cs_p90": 0.0, "bonus_p90": 0.0}
+    gk_saves = {**gk_base, "saves_p90": 3.0}
+    assert abs(_ep_from_rates(1, 90.0, gk_saves) - _ep_from_rates(1, 90.0, gk_base) - 1.0) < 1e-9
+
+    assert _defcon_pts_p90(2, 0.0) == 0.0
+    def_base = {**gk_base}
+    def_zero = {**def_base, "defcon_p90": 0.0}
+    assert abs(_ep_from_rates(2, 90.0, def_zero) - _ep_from_rates(2, 90.0, def_base)) < 1e-9
+
+    assert _poisson_tail(1.0, 0) == 1.0
+    assert _poisson_tail(0, 5) == 0.0
+    assert abs(_poisson_tail(1.0, 1) - (1 - math.exp(-1))) < 1e-9
+    assert abs(_poisson_tail(1.0, 2) - (1 - 2 * math.exp(-1))) < 1e-9
+    assert _poisson_tail(11, 10) > _poisson_tail(9, 10)
+    assert _poisson_tail(10, 12) < _poisson_tail(10, 10)
+
+
 if __name__ == "__main__":
     _leakage_self_test()
     print("leakage self-test: OK")
     _fixture_targeting_self_test()
     print("fixture targeting self-test: OK")
+    _scoring_self_test()
+    print("scoring self-test: OK")
