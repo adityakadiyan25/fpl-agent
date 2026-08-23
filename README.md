@@ -34,13 +34,21 @@ python3 scripts/snapshot.py --gw 1
 
 GW1 requires `snapshots/gw1/my_team.json` already in place. Refuses to overwrite an existing bootstrap unless `--force`.
 
-### 2. History (optional, for v1+ models)
+### 2. Fetch locked squad (GW ≥ 2)
+
+```bash
+python3 scripts/fetch_my_team.py --gw 2
+```
+
+Builds `snapshots/gwN/my_team.json` from the public picks for GW N−1 (reconstructed selling prices). Write-once unless `--force`. GW1 stays the manual authenticated export.
+
+### 3. History (optional, for v1+ models)
 
 ```bash
 python3 scripts/fetch_history.py
 ```
 
-### 3. Shadow envelope (pre-register optimal squad)
+### 4. Shadow envelope (pre-register optimal squad)
 
 ```bash
 python3 scripts/freeze_shadow.py --gw 1
@@ -48,7 +56,7 @@ python3 scripts/freeze_shadow.py --gw 1
 
 Write-once: refuses if `shadow_team.json` already exists.
 
-### 4. CLI tools
+### 5. CLI tools
 
 ```bash
 python3 main.py compare
@@ -57,7 +65,7 @@ python3 main.py optimize --model v2
 python3 main.py transfer --model v2
 ```
 
-### 5. Agent
+### 6. Agent
 
 ```bash
 python3 main.py agent "Should I transfer Mosquera?"
@@ -65,7 +73,7 @@ python3 main.py agent "Should I transfer Mosquera?"
 
 Requires `ANTHROPIC_API_KEY` in `.env` or the environment. Traces go to `traces/`.
 
-### 6. Grade & diagnose
+### 7. Grade & diagnose
 
 ```bash
 python3 scripts/grade_gw1.py

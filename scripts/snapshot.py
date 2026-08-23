@@ -79,6 +79,10 @@ def main():
     for path in saved:
         print(f"  {path}")
 
+    if args.gw >= 2:
+        print(f"Next: python3 scripts/fetch_my_team.py --gw {args.gw}")
+
 
 if __name__ == "__main__":
     main()
+
