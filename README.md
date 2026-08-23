@@ -78,14 +78,16 @@ Requires `ANTHROPIC_API_KEY` in `.env` or the environment. Traces go to `traces/
 ### 7. Grade & diagnose
 
 ```bash
-python3 scripts/grade_gw1.py
+python3 scripts/grade_gw.py --gw 1
 python3 scripts/diagnose.py
 python3 scripts/backtest.py
 ```
 
+`--provisional` peeks mid-GW while bonus is not finalised (nothing written). After FPL sets `data_checked`, the final run writes `snapshots/gwN/grade.json` — that file is the registration record for actual scores and model metrics.
+
 ## Results
 
-Predictions and shadow envelopes are **pre-registered** in git (`snapshots/gwN/prediction.json`, `shadow_team.json`) — timestamps in commit history serve as the registration record.
+Predictions and shadow envelopes are **pre-registered** in git (`snapshots/gwN/prediction.json`, `shadow_team.json`); final grades land in `grade.json` — timestamps in commit history serve as the registration record.
 
 | Metric | GW1 | Season |
 |--------|-----|--------|
