@@ -166,6 +166,7 @@ def run(question):
     }
     final_text = ""
     hit_limit = False
+    tool_calls = []
     system = _cached_system()
     tools = _cached_tools()
 
@@ -203,6 +204,12 @@ def run(question):
             results = []
             for block in tool_blocks:
                 n_tools += 1
+                tool_calls.append(
+                    {
+                        "name": block.name,
+                        "args_summary": _truncate(dict(block.input or {}), 200),
+                    }
+                )
                 t1 = time.perf_counter()
                 payload = dispatch(block.name, dict(block.input or {}))
                 tool_ms = int((time.perf_counter() - t1) * 1000)
@@ -254,6 +261,7 @@ def run(question):
         f"cost=${cost:.3f} (cached {cached_pct:.0f}%)"
     )
     print(f"trace={trace}")
+    return final_text, tool_calls, totals
 
 
 def main():

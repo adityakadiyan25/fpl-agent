@@ -85,6 +85,20 @@ python3 scripts/backtest.py
 
 `--provisional` peeks mid-GW while bonus is not finalised (nothing written). After FPL sets `data_checked`, the final run writes `snapshots/gwN/grade.json` — that file is the registration record for actual scores and model metrics.
 
+### 8. Eval
+
+Regression alarm for the conversation layer (tools + grounding + judgment), pinned to `snapshots/gw2/` and `eval/golden_set_v1.md`.
+
+```bash
+python3 eval/make_answer_key.py --gw 2          # regenerate Bucket A keys from the snapshot
+python3 eval/run_eval.py --all --yes              # 30 transcripts → eval/results/<stamp>_<sha>/
+python3 eval/grade.py --run <dir> --mode both     # code (A) + LLM judge (B/C)
+# fill human_grades_template.json for B+C, then:
+python3 eval/calibrate.py --run <dir>             # agreement vs targets; writes calibrated flag
+python3 eval/run_eval.py --set-baseline --run <dir>
+python3 eval/run_eval.py --gate --yes             # full run + both graders; fail on any drop
+```
+
 ## Results
 
 Predictions and shadow envelopes are **pre-registered** in git (`snapshots/gwN/prediction.json`, `shadow_team.json`); final grades land in `grade.json` — timestamps in commit history serve as the registration record.

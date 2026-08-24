@@ -1,0 +1,396 @@
+[
+  {
+    "id": "A01",
+    "bucket": "A",
+    "question": "who is my captain?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        "Haaland"
+      ]
+    }
+  },
+  {
+    "id": "A02",
+    "bucket": "A",
+    "question": "how much money do I have in the bank?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_number": {
+        "value": 0.0,
+        "tolerance": 0.05,
+        "unit": "money"
+      }
+    }
+  },
+  {
+    "id": "A03",
+    "bucket": "A",
+    "question": "when is the next deadline?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        [
+          "GW2",
+          "gw 2",
+          "gameweek 2"
+        ],
+        [
+          "Fri 28 Aug",
+          "Friday 28 August",
+          "28 Aug",
+          "Aug 28"
+        ],
+        [
+          "17:30 UTC",
+          "17:30",
+          "23:00 IST",
+          "11:00 PM"
+        ]
+      ]
+    }
+  },
+  {
+    "id": "A04",
+    "bucket": "A",
+    "question": "who is the most expensive player in my squad?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        "Haaland"
+      ],
+      "must_include_number": {
+        "value": 15.5,
+        "tolerance": 0.05,
+        "unit": "money"
+      }
+    }
+  },
+  {
+    "id": "A05",
+    "bucket": "A",
+    "question": "who is the cheapest player in my squad?",
+    "grader": "code",
+    "notes": "Tie: naming either (or both) at the tied price passes; any other player or price fails.",
+    "checks": {
+      "must_include_any": [
+        "Davis",
+        "Diop"
+      ],
+      "must_include_number": {
+        "value": 4.0,
+        "tolerance": 0.05,
+        "unit": "money"
+      }
+    }
+  },
+  {
+    "id": "A06",
+    "bucket": "A",
+    "question": "what is my bench, in order?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        [
+          "Lammens"
+        ],
+        [
+          "Diop"
+        ],
+        [
+          "Davis"
+        ],
+        [
+          "Georginio"
+        ]
+      ]
+    }
+  },
+  {
+    "id": "A07",
+    "bucket": "A",
+    "question": "do any of my players have injury flags right now?",
+    "grader": "code",
+    "notes": "Inventing a flag = instant fail.",
+    "checks": {
+      "must_include_any": [
+        "none",
+        "no injury",
+        "no flag",
+        "unflagged",
+        "all 15",
+        "available"
+      ]
+    }
+  },
+  {
+    "id": "A08",
+    "bucket": "A",
+    "question": "how many Arsenal players do I own?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        [
+          "Gabriel"
+        ],
+        [
+          "Mosquera"
+        ]
+      ],
+      "must_include_number": {
+        "value": 2.0,
+        "tolerance": 0.0,
+        "unit": "points"
+      }
+    }
+  },
+  {
+    "id": "A09",
+    "bucket": "A",
+    "question": "which of my defenders has the easiest GW2 fixture?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        "Truffert"
+      ],
+      "must_include_number": {
+        "value": 3.0,
+        "tolerance": 0.0,
+        "unit": "points"
+      }
+    }
+  },
+  {
+    "id": "A10",
+    "bucket": "A",
+    "question": "which of my players are at home in GW2?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        [
+          "Kinsky"
+        ],
+        [
+          "Truffert"
+        ],
+        [
+          "B.Fernandes"
+        ],
+        [
+          "Szoboszlai"
+        ],
+        [
+          "Ampadu"
+        ],
+        [
+          "João Pedro"
+        ],
+        [
+          "Lammens"
+        ]
+      ]
+    }
+  },
+  {
+    "id": "A11",
+    "bucket": "A",
+    "question": "who does the model rate highest in my squad for GW2?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        "B.Fernandes"
+      ],
+      "must_include_number": {
+        "value": 7.03,
+        "tolerance": 0.05,
+        "unit": "points"
+      }
+    }
+  },
+  {
+    "id": "A12",
+    "bucket": "A",
+    "question": "what does the model project for my captain in GW2?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        "Haaland"
+      ],
+      "must_include_number": {
+        "value": 6.33,
+        "tolerance": 0.05,
+        "unit": "points"
+      }
+    }
+  },
+  {
+    "id": "A13",
+    "bucket": "A",
+    "question": "what was my pre-registered GW1 prediction?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_number": {
+        "value": 33.2,
+        "tolerance": 0.05,
+        "unit": "points"
+      }
+    }
+  },
+  {
+    "id": "A14",
+    "bucket": "A",
+    "question": "what is my total squad value?",
+    "grader": "code",
+    "notes": "Market sum and selling-price sum can diverge after price changes; either framing passes if the number is right.",
+    "checks": {
+      "must_include_number": {
+        "value": 100.0,
+        "tolerance": 0.05,
+        "unit": "money"
+      }
+    }
+  },
+  {
+    "id": "A15",
+    "bucket": "A",
+    "question": "who is my vice-captain?",
+    "grader": "code",
+    "notes": "",
+    "checks": {
+      "must_include_any": [
+        "B.Fernandes"
+      ]
+    }
+  },
+  {
+    "id": "B01",
+    "bucket": "B",
+    "question": "who should I captain in GW2 and why?",
+    "grader": "judge",
+    "notes": "Must engage the real tension in the snapshot: model's pick is B.Fernandes 7.03 (home) vs current captain Haaland 6.33. Either choice can pass; ignoring the comparison fails G7.",
+    "checks": {}
+  },
+  {
+    "id": "B02",
+    "bucket": "B",
+    "question": "should I take a −4 hit to make two transfers this week?",
+    "grader": "judge",
+    "notes": "Must net the −4 against projected gain using tool numbers; a naked yes/no fails G1+G3.",
+    "checks": {}
+  },
+  {
+    "id": "B03",
+    "bucket": "B",
+    "question": "suggest one transfer to improve my team for GW2.",
+    "grader": "judge",
+    "notes": "Must come from `suggest_transfers` or reconcile with it; must respect £0.0m bank + selling prices (G4).",
+    "checks": {}
+  },
+  {
+    "id": "B04",
+    "bucket": "B",
+    "question": "is my team too defensive? assess my squad structure.",
+    "grader": "judge",
+    "notes": "A passing answer grounds its verdict in at least two of these frozen facts: **budget split** GKP £9.5m / DEF £27.0m / MID £35.0m / FWD £28.5m; **model's best XI shape** = 3-5-2 with Kinsky, Mosquera, Diop, Georginio benched; **named premium spread** (Haaland £15.5m up front, no premium DEF). Generic style talk with no squad-specific evidence fails G1.",
+    "checks": {}
+  },
+  {
+    "id": "B05",
+    "bucket": "B",
+    "question": "rate my squad out of 10 and name its biggest weakness.",
+    "grader": "judge",
+    "notes": "Any rating passes; the weakness must be evidenced from tool data (G1).",
+    "checks": {}
+  },
+  {
+    "id": "B06",
+    "bucket": "B",
+    "question": "should I save my free transfer this week or use it?",
+    "grader": "judge",
+    "notes": "Must weigh the actual best available move (from tools) against rolling; either verdict passes with reasoning.",
+    "checks": {}
+  },
+  {
+    "id": "B07",
+    "bucket": "B",
+    "question": "I'm thinking of selling João Pedro — talk me through it.",
+    "grader": "judge",
+    "notes": "Must ground in his data (price, projection, fixture) and end with a recommendation (G5).",
+    "checks": {}
+  },
+  {
+    "id": "B08",
+    "bucket": "B",
+    "question": "my mini-league rival is 12 points ahead. how do I catch up?",
+    "grader": "judge",
+    "notes": "Must reference rivals/ownership context if the tool provides it, and distinguish safe-vs-differential logic; generic \"score more points\" fails G5.",
+    "checks": {}
+  },
+  {
+    "id": "B09",
+    "bucket": "B",
+    "question": "which of my bench players is the weakest long-term hold?",
+    "grader": "judge",
+    "notes": "Must compare bench options with numbers, pick one.",
+    "checks": {}
+  },
+  {
+    "id": "B10",
+    "bucket": "B",
+    "question": "plan my GW2 in three bullets: lineup, captain, transfer.",
+    "grader": "judge",
+    "notes": "All three parts present, each grounded, all GW2-consistent (G2).",
+    "checks": {}
+  },
+  {
+    "id": "C01",
+    "bucket": "C",
+    "question": "should I captain Ronaldo this week?",
+    "grader": "judge",
+    "notes": "Genuinely absent from the 2026/27 bootstrap. Pass = says he's not in the game/not in my squad; fail = invents stats or a fixture. (Deliberately tempts training-data memory against tools.)",
+    "checks": {}
+  },
+  {
+    "id": "C02",
+    "bucket": "C",
+    "question": "what are my players projected to score in GW1?",
+    "grader": "judge",
+    "notes": "In the frozen world the GW1 **deadline has passed and matches are in progress** — not finished. Pass = flags that GW1 is locked/underway and pivots to GW2; fail = serves numbers labeled as GW1 projections. (Regression descendant of the `before_gw` bug.)",
+    "checks": {}
+  },
+  {
+    "id": "C03",
+    "bucket": "C",
+    "question": "transfer out Kinsky and bring in a striker instead.",
+    "grader": "judge",
+    "notes": "Pass = explains GK must be replaced by GK (squad-shape rule, see G4 definition); fail = proposes it.",
+    "checks": {}
+  },
+  {
+    "id": "C04",
+    "bucket": "C",
+    "question": "how many points will Gabriel score in GW45?",
+    "grader": "judge",
+    "notes": "Season has exactly 38 events (verified). Pass = says GW45 doesn't exist; fail = produces a number.",
+    "checks": {}
+  },
+  {
+    "id": "C05",
+    "bucket": "C",
+    "question": "how many free transfers do I have banked?",
+    "grader": "judge",
+    "notes": "The fetched `my_team.json` stores `status: \"unknown\", limit: null` (verified). Pass = says the data doesn't reliably track FT state and states the safe assumption (1 FT for GW2); fail = asserts a count as fact.",
+    "checks": {}
+  }
+]
