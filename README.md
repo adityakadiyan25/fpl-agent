@@ -13,7 +13,7 @@ Run everything from the **repository root** (paths are relative to cwd).
 | **L3 Optimize** | `fpl_agent/optimize.py` | Legal 15, best XI, captain, transfer suggestions |
 | **L4 Tools** | `fpl_agent/tools.py` | Agent-facing tool API over snapshots + models |
 | **L5 Agent** | `fpl_agent/agent.py` | Claude tool loop (`main.py agent`) |
-| **Scripts** | `scripts/` | One-off rituals (snapshot, freeze, grade, backtest, diagnose) |
+| **Scripts** | `scripts/` | One-off rituals (snapshot, freeze, grade, backtest) |
 
 ## Setup
 
@@ -75,25 +75,26 @@ python3 main.py agent "Should I transfer Mosquera?"
 
 Requires `ANTHROPIC_API_KEY` in `.env` or the environment. Traces go to `traces/`.
 
-### 7. Grade & diagnose
+### 7. Grade & backtest
 
 ```bash
 python3 scripts/grade_gw.py --gw 1
-python3 scripts/diagnose.py
-python3 scripts/backtest.py
+python3 scripts/backtest.py --season 2025-26 --models v2,baseline_xp,baseline_template,baseline_last_season --gws 2-38
 ```
 
 `--provisional` peeks mid-GW while bonus is not finalised (nothing written). After FPL sets `data_checked`, the final run writes `snapshots/gwN/grade.json` — that file is the registration record for actual scores and model metrics.
+
+Season model auditions go through the **live** `project()` engine via `scripts/backtest.py` (replay adapter in `fpl_agent/replay.py`). Pre-unification diagnose/backtest numbers measured a divergent model copy and are superseded by `reports/scoreboard_*.json`.
 
 ### 8. Eval
 
 Regression alarm for the conversation layer (tools + grounding + judgment), pinned to `snapshots/gw2/` and `eval/golden_set_v1.md`.
 
 ```bash
-python3 eval/make_answer_key.py --gw 2          # regenerate Bucket A keys from the snapshot
-python3 eval/run_eval.py --all --yes              # 30 transcripts → eval/results/<stamp>_<sha>/
+python3 eval/make_answer_key.py --gw 2          # regenerate Bucket A keys (no edits expected)
+python3 eval/run_eval.py --all --yes --prev <old-dir>   # schema-2 transcripts; diffs vs previous; carries human grades for identical answers
+# re-grade flagged cases in human_grades_template.json (byte-identical answers already copied)
 python3 eval/grade.py --run <dir> --mode both     # code (A) + LLM judge (B/C)
-# fill human_grades_template.json for B+C, then:
 python3 eval/calibrate.py --run <dir>             # agreement vs targets; writes calibrated flag
 python3 eval/run_eval.py --set-baseline --run <dir>
 python3 eval/run_eval.py --gate --yes             # full run + both graders; fail on any drop
@@ -108,4 +109,4 @@ Predictions and shadow envelopes are **pre-registered** in git (`snapshots/gwN/p
 | Projected score (v2) | TBD | — |
 | Actual score | TBD | TBD |
 | Shadow vs actual | TBD | TBD |
-| Model backtest (diagnose headline) | — | TBD |
+| Model backtest (unified scoreboard) | — | see `reports/scoreboard_*.json` |

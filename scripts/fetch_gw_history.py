@@ -15,6 +15,7 @@ from fpl_agent.data import load_snapshot
 
 OUT_DIR = Path("data/season")
 PER_GW_PATH = OUT_DIR / "per_gw_2025-26.json"
+FIXTURES_PATH = OUT_DIR / "fixtures_2025-26.json"
 UNMATCHED_PATH = OUT_DIR / "unmatched.txt"
 XGC_COLS = ("expected_goals", "expected_assists", "expected_goal_involvements")
 
@@ -38,15 +39,30 @@ def _norm_name(value):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _gw_stats(rows):
-    """Minutes, starts, points, goals, assists for one player-GW (DGW-safe)."""
+def _load_team_name_to_id(season=SEASON):
+    """vaastav teams.csv name → id (same id-space as fixtures.csv)."""
+    path = cache_csv(f"{season}/teams.csv")
+    rows = load_csv(path)
+    out = {}
+    for row in rows:
+        name = row.get("name") or ""
+        tid = _to_int(row.get("id"))
+        if name and tid:
+            out[name] = tid
+    return out
+
+
+def _gw_stats(rows, team_name_to_id):
+    """Minutes, starts, points, goals, assists + replay fields (DGW-safe)."""
     uniq = unique_fixture_rows(rows)
+    first = uniq[0]
     has_starts = any(r.get("starts") not in (None, "") for r in uniq)
     minutes = sum_rows(uniq, "minutes")
     if has_starts:
         starts = sum_rows(uniq, "starts")
     else:
         starts = sum(1 for r in uniq if _to_int(r.get("minutes")) >= 60)
+    team_name = first.get("team") or ""
     return {
         "minutes": minutes,
         "starts": starts,
@@ -58,15 +74,23 @@ def _gw_stats(rows):
         "expected_goal_involvements": round(
             sum_rows(uniq, "expected_goal_involvements", _to_float), 2
         ),
+        # Replay / live-adapter fields (player-level; first unique fixture).
+        "value": _to_int(first.get("value")),
+        "selected": _to_int(first.get("selected")),
+        "xp": round(sum_rows(uniq, "xP", _to_float), 2),
+        "position": first.get("position") or "",
+        "team": team_name,
+        "team_id": team_name_to_id.get(team_name),
+        "name": first.get("name") or "",
     }
 
 
-def _build_vaastav_gw_index(merged_rows):
+def _build_vaastav_gw_index(merged_rows, team_name_to_id):
     """vaastav element id → {gw: stats}."""
     by_key, max_gw = index_merged(merged_rows)
     out = defaultdict(dict)
     for (vaastav_id, gw), rows in by_key.items():
-        out[vaastav_id][str(gw)] = _gw_stats(rows)
+        out[vaastav_id][str(gw)] = _gw_stats(rows, team_name_to_id)
     return out, max_gw
 
 
@@ -157,6 +181,39 @@ def _print_haaland_sanity(per_gw, elements):
     print(f"Sanity — Haaland: season xG={total_xg} vs goals={total_goals}")
 
 
+def write_fixtures_json(season=SEASON, force=False):
+    """Download season fixtures.csv → live-schema fixtures JSON (write-once)."""
+    if FIXTURES_PATH.exists() and not force:
+        print(f"Refusing to overwrite {FIXTURES_PATH}. Pass --force to refresh.")
+        return FIXTURES_PATH
+    path = cache_csv(f"{season}/fixtures.csv")
+    rows = load_csv(path)
+    out = []
+    for row in rows:
+        event = _to_int(row.get("event"))
+        if not event:
+            continue
+        out.append(
+            {
+                "event": event,
+                "team_h": _to_int(row.get("team_h")),
+                "team_a": _to_int(row.get("team_a")),
+                "team_h_difficulty": _to_int(row.get("team_h_difficulty")),
+                "team_a_difficulty": _to_int(row.get("team_a_difficulty")),
+            }
+        )
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    FIXTURES_PATH.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+    print(f"Wrote {len(out)} fixtures → {FIXTURES_PATH}")
+    sample = next((fx for fx in out if fx["event"] == 1), None)
+    if sample:
+        print(
+            f"Spot-check GW1: team_h={sample['team_h']} team_a={sample['team_a']} "
+            f"FDR h/a={sample['team_h_difficulty']}/{sample['team_a_difficulty']}"
+        )
+    return FIXTURES_PATH
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build per-GW player actuals from vaastav merged_gw.csv"
@@ -167,7 +224,22 @@ def main():
         default=1,
         help="bootstrap snapshot gameweek for player catalogue (default 1)",
     )
+    parser.add_argument(
+        "--include-fixtures",
+        action="store_true",
+        help=f"also write {FIXTURES_PATH} from vaastav fixtures.csv",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite fixtures JSON if it already exists",
+    )
     args = parser.parse_args()
+
+    if args.include_fixtures:
+        write_fixtures_json(force=args.force)
+
+    team_name_to_id = _load_team_name_to_id()
 
     merged_path = cache_csv(f"{SEASON}/gws/merged_gw.csv")
     raw_path = cache_csv(f"{SEASON}/players_raw.csv")
@@ -180,16 +252,20 @@ def main():
     teams_by_id = {t["id"]: t["name"] for t in bootstrap["teams"]}
     elements = bootstrap["elements"]
 
-    vaastav_gws, max_gw = _build_vaastav_gw_index(merged_rows)
+    vaastav_gws, max_gw = _build_vaastav_gw_index(merged_rows, team_name_to_id)
     by_code, by_web_name = _index_raw_players(raw_rows)
     matched, unmatched, matched_by_code, matched_by_name = _match_bootstrap_players(
         elements, by_code, by_web_name
     )
 
     per_gw = {}
+    missing_team_id = 0
     for bid, (vaastav_id, method) in matched.items():
         history = vaastav_gws.get(vaastav_id)
         if history:
+            for gw_stats in history.values():
+                if gw_stats.get("team_id") is None:
+                    missing_team_id += 1
             per_gw[str(bid)] = history
             continue
         player = next(p for p in elements if p["id"] == bid)
@@ -228,6 +304,8 @@ def main():
         f"Match rate: {matched_total}/{bootstrap_total} ({match_rate:.1f}%) "
         f"[code={matched_by_code}, name={matched_by_name}]"
     )
+    if missing_team_id:
+        print(f"Warning: {missing_team_id} player-GW rows missing team_id")
     if unmatched_total:
         print(f"Unmatched: {unmatched_total} → {UNMATCHED_PATH}")
     else:

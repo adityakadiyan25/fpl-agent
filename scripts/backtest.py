@@ -1,41 +1,58 @@
-"""Backtest our v1/v2-style projections against 2025-26 actuals.
+"""Season replay through the LIVE projection engine + dumb baselines.
 
-Simplification (v1 of this backtest): ignore transfers and budget
-carryover. Each GW we pick a fresh legal 15 + XI from the full pool
-at £100m, as if every week were a free-hit.
+Simplification: ignore transfers and budget carryover. Each GW we pick a fresh
+legal 15 + XI from the full pool at £100m, as if every week were a free-hit.
+
+All model math comes from ``fpl_agent.projections.project``. This script only
+loads historical data, adapts it via ``fpl_agent.replay``, scores with
+``fpl_agent.metrics``, and picks squads with ``fpl_agent.optimize``.
 """
 
 import _bootstrap  # noqa: F401
 
+import argparse
 import csv
+import json
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
 import requests
 
-from fpl_agent.data import POSITION_LABELS
-from fpl_agent.optimize import MIN_IN_XI, MAX_IN_XI, best_squad, best_xi
-from fpl_agent.projections import (
-    XGC_COLS,
-    _crowd_play_prob,
-    _ep_from_rates,
-    assert_pre_gw,
-    expected_minutes_v2_from_apps,
-    per_90_rates,
-    stable_rates_from_totals,
+from fpl_agent.metrics import fmt_metric, gw_metrics, mean_metric, xi_score
+from fpl_agent.optimize import best_squad, best_xi
+from fpl_agent.projections import project
+from fpl_agent.replay import (
+    baseline_last_season,
+    baseline_template,
+    baseline_xp,
+    build_replay_inputs,
+    replay_caveats,
 )
-
-# xP is FPL's ep_this scraped after the GW; it may include post-match
-# info. We still use it as the official-model benchmark, as requested,
-# but we never feed this GW's xP into *our* projections.
 
 REPO_RAW = "https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data"
 DATA_DIR = Path("data")
 SEASON = "2025-26"
 PRIOR_SEASON = "2024-25"
-
-POS_TO_TYPE = {"GK": 1, "GKP": 1, "DEF": 2, "MID": 3, "FWD": 4}
 BUDGET = 1000
+REPORTS_DIR = Path("reports")
+
+ENGINE_MODELS = ("v0", "v1", "v2", "v3a", "v3b")
+BASELINE_MODELS = ("baseline_last_season", "baseline_template", "baseline_xp")
+ALL_MODELS = ENGINE_MODELS + BASELINE_MODELS
+
+METRIC_KEYS = (
+    "mae",
+    "bias",
+    "rmse",
+    "spearman",
+    "p_at_11",
+    "haul_recall",
+    "captain_regret",
+)
+VERDICT_METRICS = ("mae", "rmse", "spearman", "p_at_11", "haul_recall", "mean_xi")
+# Lower is better for these; higher is better for the rest.
+LOWER_BETTER = {"mae", "rmse", "captain_regret"}
 
 
 def _to_int(value, default=0):
@@ -50,10 +67,6 @@ def _to_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _is_true(value):
-    return str(value).strip().lower() in ("true", "1", "yes")
 
 
 def cache_csv(rel_path):
@@ -73,26 +86,6 @@ def cache_csv(rel_path):
 def load_csv(path):
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
-
-
-def _require_xgc_columns(fieldnames):
-    if not fieldnames:
-        raise SystemExit("merged_gw.csv has no column headers")
-    missing = [col for col in XGC_COLS if col not in fieldnames]
-    if missing:
-        print(f"merged_gw.csv missing required columns: {missing}")
-        print("Actual columns:")
-        for col in fieldnames:
-            print(f"  {col}")
-        raise SystemExit(1)
-
-
-def download_season_files():
-    """Cache 2025-26 GW + player files, plus 2024-25 players_raw for prior totals."""
-    merged_path = cache_csv(f"{SEASON}/gws/merged_gw.csv")
-    raw_path = cache_csv(f"{SEASON}/players_raw.csv")
-    prior_path = cache_csv(f"{PRIOR_SEASON}/players_raw.csv")
-    return merged_path, raw_path, prior_path
 
 
 def index_merged(rows):
@@ -124,57 +117,14 @@ def unique_fixture_rows(rows):
     return list(by_fx.values())
 
 
-def gw_bundle(rows):
-    """Collapse a player's rows for one GW.
-
-    Distinct fixtures (true DGW) are summed for points/minutes/xP.
-    Same-fixture duplicate rows are dropped. Ownership/price are player-level
-    and taken from the first unique fixture, never summed.
-    """
-    n_raw = len(rows)
-    uniq = unique_fixture_rows(rows)
-    first = uniq[0]
-    has_starts = any(r.get("starts") not in (None, "") for r in uniq)
-    minutes = sum_rows(uniq, "minutes")
-    if has_starts:
-        starts = sum_rows(uniq, "starts")
-    else:
-        starts = sum(1 for r in uniq if _to_int(r.get("minutes")) >= 60)
-    has_xg = any(r.get("expected_goals") not in (None, "") for r in uniq)
-    return {
-        "name": first.get("name") or "",
-        "position": first.get("position") or "",
-        "team": first.get("team") or "",
-        "value": _to_int(first.get("value")),
-        "was_home": _is_true(first.get("was_home")),
-        "selected": _to_int(first.get("selected")),
-        "points": sum_rows(uniq, "total_points"),
-        "minutes": minutes,
-        "starts": starts,
-        "goals_scored": sum_rows(uniq, "goals_scored"),
-        "assists": sum_rows(uniq, "assists"),
-        "clean_sheets": sum_rows(uniq, "clean_sheets"),
-        "bonus": sum_rows(uniq, "bonus"),
-        "expected_goals": sum_rows(uniq, "expected_goals", _to_float) if has_xg else 0.0,
-        "expected_assists": sum_rows(uniq, "expected_assists", _to_float) if has_xg else 0.0,
-        "expected_goal_involvements": (
-            sum_rows(uniq, "expected_goal_involvements", _to_float) if has_xg else 0.0
-        ),
-        "has_xg": has_xg,
-        "xp": sum_rows(uniq, "xP", _to_float),
-        "n_raw_rows": n_raw,
-        "n_fixtures": len(uniq),
-    }
-
-
 def prior_totals_by_code(prior_rows):
-    """code → 2024/25 season totals (stable across FPL id resets)."""
+    """code → prior-season totals (stable across FPL id resets)."""
     out = {}
     for row in prior_rows:
         code = _to_int(row.get("code"))
         if not code:
             continue
-        out[code] = {
+        entry = {
             "season_name": "2024/25",
             "minutes": _to_int(row.get("minutes")),
             "goals_scored": _to_int(row.get("goals_scored")),
@@ -183,520 +133,331 @@ def prior_totals_by_code(prior_rows):
             "bonus": _to_int(row.get("bonus")),
             "total_points": _to_int(row.get("total_points")),
             "points_per_game": _to_float(row.get("points_per_game")),
+            "saves": _to_int(row.get("saves")),
         }
+        # defensive_contribution absent in 2024-25 players_raw — leave out.
+        if "defensive_contribution" in row and row.get("defensive_contribution") not in (
+            None,
+            "",
+        ):
+            entry["defensive_contribution"] = _to_int(row.get("defensive_contribution"))
+        out[code] = entry
     return out
 
 
-def rolling_totals(by_key, pid, before_gw):
-    """Sum GWs 1..before_gw-1 only — no peeking at the GW being scored."""
-    acc = {
-        "minutes": 0,
-        "goals_scored": 0,
-        "assists": 0,
-        "clean_sheets": 0,
-        "bonus": 0,
-        "points": 0,
-        "expected_goals": 0.0,
-        "expected_assists": 0.0,
-        "xg_gws": 0,
-        "n_played": 0,
-        "last_minutes": 0,
-        "last3_minutes": 0,
-        "lagged_xp": 0.0,
-        "lagged_selected": 0,
-    }
-    n_prior = before_gw - 1
-    feature_gws = []
-    for gw in range(1, before_gw):
-        rows = by_key.get((pid, gw))
-        if not rows:
+def git_short_sha():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def git_commit_iso():
+    """Stable timestamp for deterministic scoreboard JSON."""
+    try:
+        return subprocess.check_output(
+            ["git", "show", "-s", "--format=%cI", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def parse_gws(spec, max_gw):
+    """Parse '2-38' or '2,5,10' into a sorted list capped by max_gw."""
+    gws = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
             continue
-        feature_gws.append(gw)
-        b = gw_bundle(rows)
-        acc["minutes"] += b["minutes"]
-        acc["goals_scored"] += b["goals_scored"]
-        acc["assists"] += b["assists"]
-        acc["clean_sheets"] += b["clean_sheets"]
-        acc["bonus"] += b["bonus"]
-        acc["points"] += b["points"]
-        if b.get("has_xg"):
-            acc["expected_goals"] += b["expected_goals"]
-            acc["expected_assists"] += b["expected_assists"]
-            acc["xg_gws"] += 1
-        if b["minutes"] > 0:
-            acc["n_played"] += 1
-        if gw == n_prior:
-            acc["last_minutes"] = b["minutes"]
-            acc["lagged_xp"] = b["xp"]
-            acc["lagged_selected"] = b["selected"]
-        if gw > n_prior - 3:
-            acc["last3_minutes"] += b["minutes"]
-    assert_pre_gw(feature_gws, before_gw)
-    acc["n_gws"] = n_prior
-    return acc
+        if "-" in part:
+            lo_s, hi_s = part.split("-", 1)
+            lo, hi = int(lo_s), int(hi_s)
+            gws.update(range(lo, hi + 1))
+        else:
+            gws.add(int(part))
+    return sorted(g for g in gws if 1 <= g <= max_gw)
 
 
-def gw_pool(by_key, gw):
-    """Players with a fixture in this GW: [(pid, element_type, bundle), ...]."""
-    pool = []
-    for (pid, row_gw), rows in by_key.items():
-        if row_gw != gw:
-            continue
-        b = gw_bundle(rows)
-        etype = POS_TO_TYPE.get(b["position"])
-        if not etype:
-            continue
-        pool.append((pid, etype, b))
-    return pool
+def load_season_bundle(season):
+    """per_gw JSON, fixtures JSON, prior totals keyed by bootstrap player id."""
+    season_tag = season
+    per_gw_path = DATA_DIR / "season" / f"per_gw_{season_tag}.json"
+    fixtures_path = DATA_DIR / "season" / f"fixtures_{season_tag}.json"
+    if not per_gw_path.exists():
+        raise SystemExit(
+            f"Missing {per_gw_path}. Run: python3 scripts/fetch_gw_history.py --gw 2"
+        )
+    if not fixtures_path.exists():
+        raise SystemExit(
+            f"Missing {fixtures_path}. Run: "
+            f"python3 scripts/fetch_gw_history.py --gw 2 --include-fixtures"
+        )
 
+    per_gw = json.loads(per_gw_path.read_text(encoding="utf-8"))
+    fixtures = json.loads(fixtures_path.read_text(encoding="utf-8"))
 
-def load_replay():
-    """Cached 2025-26 merged_gw + players_raw, and 2024-25 prior totals."""
-    merged_path, raw_path, prior_path = download_season_files()
-    merged = load_csv(merged_path)
-    _require_xgc_columns(merged[0].keys() if merged else None)
-    raw = load_csv(raw_path)
-    prior_rows = load_csv(prior_path)
-    by_key, max_gw = index_merged(merged)
+    prior_path = cache_csv(f"{PRIOR_SEASON}/players_raw.csv")
+    raw_path = cache_csv(f"{season_tag}/players_raw.csv")
+    prior_by_code = prior_totals_by_code(load_csv(prior_path))
+    raw_rows = load_csv(raw_path)
+    code_of = {_to_int(r["id"]): _to_int(r.get("code")) for r in raw_rows}
+    # Bootstrap ids in per_gw: map via bootstrap snapshot codes when available.
+    # per_gw keys are bootstrap ids; resolve prior via current-season players_raw
+    # only works for vaastav ids. Re-resolve using bootstrap from snapshot.
+    from fpl_agent.data import load_snapshot
+
+    snap = load_snapshot(2)
+    bootstrap_code = {p["id"]: _to_int(p.get("code")) for p in snap["bootstrap"]["elements"]}
+    names = {p["id"]: p.get("web_name") or "" for p in snap["bootstrap"]["elements"]}
+    prior_by_pid = {}
+    for pid_s in per_gw:
+        pid = int(pid_s)
+        code = bootstrap_code.get(pid) or code_of.get(pid)
+        if code and code in prior_by_code:
+            prior_by_pid[pid] = prior_by_code[code]
+
+    max_gw = 1
+    for gws in per_gw.values():
+        for g in gws:
+            max_gw = max(max_gw, int(g))
+
     return {
-        "by_key": by_key,
+        "per_gw": per_gw,
+        "fixtures": fixtures,
+        "prior_by_pid": prior_by_pid,
+        "names": names,
         "max_gw": max_gw,
-        "n_rows": len(merged),
-        "code_of": {_to_int(r["id"]): _to_int(r.get("code")) for r in raw},
-        "web_name_of": {_to_int(r["id"]): r.get("web_name") or "" for r in raw},
-        "prior_by_code": prior_totals_by_code(prior_rows),
+        "per_gw_path": str(per_gw_path),
+        "fixtures_path": str(fixtures_path),
     }
 
 
-def compute_v1(etype, prior, form):
-    """v1 EP from prior-season + rolling form. None if no history (no price fallback)."""
-    n_gws = form["n_gws"] or 1
-    prior_rates = (
-        rates_from_totals(
-            prior["minutes"],
-            prior["goals_scored"],
-            prior["assists"],
-            prior["clean_sheets"],
-            prior["bonus"],
-            "2024/25",
-        )
-        if prior
-        else None
-    )
-    form_rates = (
-        rates_from_totals(
-            form["minutes"],
-            form["goals_scored"],
-            form["assists"],
-            form["clean_sheets"],
-            form["bonus"],
-            "2025/26",
-        )
-        if form["minutes"]
-        else None
-    )
-    if form_rates is not None:
-        exp_mins = min(90.0, form["minutes"] / n_gws)
-        form_ep = _ep_from_rates(etype, exp_mins, form_rates)
-    else:
-        form_ep = None
-    if prior_rates is not None:
-        prior_mins = min(90.0, prior["minutes"] / 38.0)
-        prior_ep = _ep_from_rates(etype, prior_mins, prior_rates)
-    else:
-        prior_ep = None
-    if form_ep is not None and prior_ep is not None:
-        w_form = min(0.75, n_gws / 12.0)
-        return (1.0 - w_form) * prior_ep + w_form * form_ep
-    if form_ep is not None:
-        return form_ep
-    if prior_ep is not None:
-        return prior_ep
-    return None
+def _proj_eps(packed):
+    return {pid: row["ep"] for pid, row in packed.items()}
 
 
-def apply_v2(v1, form, was_home):
-    """v2 adjustments on a v1 value. None if v1 is None."""
-    if v1 is None:
-        return None
-    n_gws = form["n_gws"] or 1
-    blended = max(v1, form["lagged_xp"])
-    avail = 1.0
-    if n_gws >= 1 and form["last_minutes"] == 0:
-        avail = 0.75
-    if n_gws >= 3 and form["last3_minutes"] == 0:
-        avail = 0.25
-    fixture_adj = 1.08 if was_home else 0.95
-    return blended * avail * fixture_adj
-
-
-def appearance_window(by_key, pid, before_gw, window=10):
-    """Last N appearances (minutes>0) before before_gw."""
-    apps = []
-    feature_gws = []
-    for gw in range(before_gw - 1, 0, -1):
-        rows = by_key.get((pid, gw))
-        if not rows:
-            continue
-        bundle = gw_bundle(rows)
-        if bundle["minutes"] > 0:
-            apps.append(
-                {
-                    "starts": bundle["starts"],
-                    "minutes": bundle["minutes"],
-                    "_gw": gw,
-                }
-            )
-            feature_gws.append(gw)
-            if len(apps) >= window:
-                break
-    assert_pre_gw(feature_gws, before_gw)
-    return apps
-
-
-def _form_as_window_totals(form):
-    return {
-        "minutes": form["minutes"],
-        "goals": form["goals_scored"],
-        "assists": form["assists"],
-        "clean_sheets": form["clean_sheets"],
-        "bonus": form["bonus"],
-        "expected_goals": form.get("expected_goals") or 0.0,
-        "expected_assists": form.get("expected_assists") or 0.0,
-        "xg_gws": form.get("xg_gws") or 0,
-    }
-
-
-def compute_v3(etype, prior, form, by_key, pid, before_gw, selected, was_home, use_xg=False, fallback_counter=None):
-    """v3a/v3b: appearance p_play × stable rates, then v2 availability/fixture."""
-    apps = appearance_window(by_key, pid, before_gw)
-    crowd_p = _crowd_play_prob(selected_count=selected)
-    mins_info = expected_minutes_v2_from_apps(apps, crowd_p)
-
-    prior_rates = (
-        rates_from_totals(
-            prior["minutes"],
-            prior["goals_scored"],
-            prior["assists"],
-            prior["clean_sheets"],
-            prior["bonus"],
-            "2024/25",
-        )
-        if prior
-        else None
-    )
-    window = _form_as_window_totals(form)
-    rates = stable_rates_from_totals(
-        window,
-        prior_rates,
-        use_xg=use_xg,
-        fallback_counter=fallback_counter,
-    )
-    if rates is None:
-        return None
-
-    base = mins_info["p_play"] * _ep_from_rates(
-        etype, mins_info["play_minutes"], rates
-    )
-    return apply_v2(base, form, was_home)
-
-
-def compute_v3a(etype, prior, form, by_key, pid, before_gw, selected, was_home, fallback_counter=None):
-    return compute_v3(
-        etype, prior, form, by_key, pid, before_gw, selected, was_home,
-        use_xg=False, fallback_counter=fallback_counter,
-    )
-
-
-def compute_v3b(etype, prior, form, by_key, pid, before_gw, selected, was_home, fallback_counter=None):
-    return compute_v3(
-        etype, prior, form, by_key, pid, before_gw, selected, was_home,
-        use_xg=True, fallback_counter=fallback_counter,
-    )
-
-
-def rates_from_totals(minutes, goals, assists, cs, bonus, season_name):
-    return per_90_rates(
-        [
-            {
-                "season_name": season_name,
-                "minutes": minutes,
-                "goals_scored": goals,
-                "assists": assists,
-                "clean_sheets": cs,
-                "bonus": bonus,
-            }
-        ]
-    )
-
-
-def project_player(etype, prior, form, now_cost, was_home, ppm_by_pos):
-    """v1 blend of prior-season + rolling form, then v2 home/away + availability.
-
-    Uses only pre-GW information: 2024-25 totals, GWs already played,
-    this GW's price/home flag (known at deadline). Not this GW's xP.
-    """
-    v1 = compute_v1(etype, prior, form)
-    if v1 is None:
-        v1 = ppm_by_pos.get(etype, 0.0) * (now_cost / 10.0)
-        low_confidence = True
-    else:
-        low_confidence = False
-    return apply_v2(v1, form, was_home), low_confidence
-
-
-def build_ppm(by_key, code_of, prior_by_code, pids, before_gw):
-    """Price fallback from players who already have a v1 reading."""
-    buckets = {1: [], 2: [], 3: [], 4: []}
-    for pid, etype, now_cost in pids:
-        prior = prior_by_code.get(code_of.get(pid))
-        form = rolling_totals(by_key, pid, before_gw)
-        ep, low = project_player(etype, prior, form, now_cost, True, {1: 0, 2: 0, 3: 0, 4: 0})
-        if low or now_cost <= 0:
-            continue
-        buckets[etype].append((now_cost / 10.0, ep))
-    ppm = {}
-    for etype, pairs in buckets.items():
-        ppm[etype] = sum(ep / price for price, ep in pairs) / len(pairs) if pairs else 0.0
-    return ppm
-
-
-def score_xi(xi_ids, captain_id, actual_points):
-    """Sum ACTUAL points of 11 unique players, captain counted twice.
-
-    Used for our XI, the ownership template, and the xP bench.
-    """
-    uniq = list(dict.fromkeys(xi_ids))
-    if len(uniq) != 11:
-        raise ValueError(f"XI must be 11 unique players, got {len(uniq)}: {uniq}")
-    if captain_id not in actual_points:
-        raise ValueError(f"captain {captain_id} missing actual points")
-    return sum(actual_points[i] for i in uniq) + actual_points[captain_id]
-
-
-def pick_optimal(projections, players, actual_points):
-    """Legal 15 + XI via the optimizer; score with actual points."""
+def pick_xi(projections, players, actual):
+    """Legal 15 + XI via optimizer; return (actual XI points, xi_ids, captain_id)."""
     try:
         squad = best_squad(projections, players, budget=BUDGET)
         xi, captain = best_xi(squad, projections, players)
     except SystemExit as exc:
         print(f"  solver failed: {exc}")
-        return 0.0, [], None
-    return score_xi(xi, captain, actual_points), xi, captain
+        return None, None, None
+    return xi_score(xi, captain, actual), xi, captain
 
 
-def _formation_ok(counts):
-    n = sum(counts.values())
-    if n > 11:
-        return False
-    for etype in (1, 2, 3, 4):
-        if counts[etype] > MAX_IN_XI[etype]:
-            return False
-    need = sum(max(0, MIN_IN_XI[et] - counts[et]) for et in (1, 2, 3, 4))
-    return need <= (11 - n)
-
-
-def template_xi(pool):
-    """Most-owned legal XI (1 GK, 3–5 DEF, 2–5 MID, 1–3 FWD, max 3 per club).
-
-    Greedy by `selected`. Captain = most-owned MID/FWD in the XI.
-    """
-    ranked = sorted(pool, key=lambda t: (-t[2]["selected"], t[0]))
-    counts = {1: 0, 2: 0, 3: 0, 4: 0}
-    clubs = defaultdict(int)
-    picked = []
-    seen = set()
-    for pid, etype, b in ranked:
-        if pid in seen:
-            continue
-        trial = dict(counts)
-        trial[etype] += 1
-        if not _formation_ok(trial):
-            continue
-        if clubs[b["team"]] >= 3:
-            continue
-        picked.append((pid, etype, b))
-        seen.add(pid)
-        counts[etype] += 1
-        clubs[b["team"]] += 1
-        if len(picked) == 11:
-            break
-    if len(picked) != 11:
-        raise SystemExit(f"template XI only filled {len(picked)} players")
-    attackers = [p for p in picked if p[1] in (3, 4)]
-    captain = max(attackers or picked, key=lambda p: p[2]["selected"])[0]
-    return [p[0] for p in picked], captain
-
-
-def print_xi_audit(label, gw, xi, captain, players, bundles, actual, xp, score):
-    """Dump 11 unique players, xP vs actual, DGW row counts, cost, score check."""
-    print()
-    print(f"=== {label} GW{gw} ===")
-    print(
-        f"{'Name':<22} {'Pos':<4} {'Team':<16} {'xP':>6} {'Act':>5} "
-        f"{'Raw':>4} {'Fx':>3} {'£m':>5}"
-    )
-    print("-" * 72)
-    cost = 0
-    act_sum = 0
-    any_dup_player = len(xi) != len(set(xi))
-    any_raw_dup = False
-    for pid in xi:
-        p = players[pid]
-        b = bundles[pid]
-        cap = " (C)" if pid == captain else ""
-        raw = b["n_raw_rows"]
-        fx = b["n_fixtures"]
-        if raw > fx:
-            any_raw_dup = True
-        cost += p["now_cost"]
-        act_sum += actual[pid]
-        print(
-            f"{p['web_name']:<22} {POSITION_LABELS[p['element_type']]:<4} "
-            f"{p['team_name']:<16} {xp.get(pid, 0):>6.1f} {actual[pid]:>5} "
-            f"{raw:>4} {fx:>3} {p['now_cost']/10:>5.1f}{cap}"
+def build_model_projections(model, players, history, fixtures, gw, per_gw, bundle):
+    if model in ENGINE_MODELS:
+        # Truncate per-GW history windows to pre-gw for the engine (it also
+        # asserts before_gw internally).
+        return project(
+            players,
+            history,
+            fixtures,
+            model,
+            before_gw=gw,
+            per_gw_history=per_gw if model in ("v3a", "v3b") else None,
         )
-    recomputed = act_sum + actual[captain]
-    print("-" * 72)
-    print(f"Unique players in XI: {len(set(xi))} (list len {len(xi)})")
-    print(f"Any player listed twice: {any_dup_player}")
-    print(f"Any same-fixture duplicate rows in source: {any_raw_dup}")
-    print(f"True DGW (n_fixtures>1) in XI: {sum(1 for i in xi if bundles[i]['n_fixtures']>1)}")
-    print(f"Total cost of 11: £{cost/10:.1f}m")
-    print(f"Sum of 11 actuals: {act_sum}  + captain extra {actual[captain]}  = {recomputed}")
-    print(f"Printed score: {score}  match={recomputed == score}")
-    print()
+    if model == "baseline_last_season":
+        return baseline_last_season(players, history)
+    if model == "baseline_template":
+        return baseline_template(players, bundle["selected"])
+    if model == "baseline_xp":
+        return baseline_xp(players, bundle["xp"])
+    raise ValueError(f"Unknown model {model!r}")
+
+
+def _round_or_none(val, nd=4):
+    if val is None:
+        return None
+    return round(float(val), nd)
+
+
+def summarize(per_gw_rows):
+    """Mean metrics + mean XI across GWs for one model."""
+    summary = {}
+    for key in METRIC_KEYS:
+        summary[key] = _round_or_none(mean_metric([r["metrics"].get(key) for r in per_gw_rows]))
+    summary["mean_xi"] = _round_or_none(mean_metric([r.get("xi_points") for r in per_gw_rows]))
+    summary["n_gws"] = len(per_gw_rows)
+    return summary
+
+
+def verdict_block(summaries, models, baselines):
+    """model vs each baseline: better/worse per metric."""
+    lines = []
+    engine = [m for m in models if m not in BASELINE_MODELS]
+    for model in engine:
+        sm = summaries.get(model) or {}
+        for base in baselines:
+            if base not in summaries:
+                continue
+            sb = summaries[base]
+            bits = []
+            for key in VERDICT_METRICS:
+                a, b = sm.get(key), sb.get(key)
+                if a is None or b is None:
+                    bits.append(f"{key}=n/a")
+                    continue
+                if key in LOWER_BETTER:
+                    tag = "better" if a < b else ("worse" if a > b else "tie")
+                else:
+                    tag = "better" if a > b else ("worse" if a < b else "tie")
+                bits.append(f"{key}:{tag}")
+            lines.append(f"{model} vs {base}: " + ", ".join(bits))
+    return lines
+
+
+def print_table(summaries, models):
+    cols = ("mae", "bias", "rmse", "spearman", "p_at_11", "haul_recall", "captain_regret", "mean_xi")
+    width = 14
+    print(f"{'model':<24}" + "".join(f"{c:>{width}}" for c in cols) + f"{'n':>6}")
+    print("-" * (24 + width * len(cols) + 6))
+    for model in models:
+        s = summaries.get(model)
+        if not s:
+            continue
+        row = f"{model:<24}"
+        for c in cols:
+            row += fmt_metric(s.get(c), width=width, nd=3)
+        row += f"{s.get('n_gws', 0):>6}"
+        print(row)
 
 
 def main():
-    replay = load_replay()
-    by_key = replay["by_key"]
-    max_gw = replay["max_gw"]
-    code_of = replay["code_of"]
-    web_name_of = replay["web_name_of"]
-    prior_by_code = replay["prior_by_code"]
-    print(f"Loaded {replay['n_rows']} GW rows through GW{max_gw}")
+    parser = argparse.ArgumentParser(description="Unified live-engine season backtest")
+    parser.add_argument("--season", default=SEASON)
+    parser.add_argument(
+        "--models",
+        default="v2,baseline_last_season,baseline_template,baseline_xp",
+        help="comma-separated models: " + ",".join(ALL_MODELS),
+    )
+    parser.add_argument("--gws", default="2-38", help="e.g. 2-38 or 2,5,10")
+    args = parser.parse_args()
 
-    last_gw = min(38, max_gw)
-    results = []  # (gw, ours, template, xp_score_or_none)
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    unknown = [m for m in models if m not in ALL_MODELS]
+    if unknown:
+        raise SystemExit(f"Unknown model(s): {unknown}. Expected one of {ALL_MODELS}")
 
-    for gw in range(2, last_gw + 1):
-        pool = [(pid, etype, b) for pid, etype, b in gw_pool(by_key, gw) if b["value"] > 0]
-        bundles = {pid: b for pid, etype, b in pool}
+    bundle = load_season_bundle(args.season)
+    per_gw = bundle["per_gw"]
+    fixtures = bundle["fixtures"]
+    prior_by_pid = bundle["prior_by_pid"]
+    names = bundle["names"]
+    gws = parse_gws(args.gws, bundle["max_gw"])
+    if not gws:
+        raise SystemExit(f"No GWs to run (max_gw={bundle['max_gw']})")
 
-        if not pool:
-            print(f"GW{gw}: no players, skipped")
+    # baseline_xp only if the season file carries xp
+    sample_row = next(iter(next(iter(per_gw.values())).values()))
+    has_xp_col = "xp" in sample_row
+    if "baseline_xp" in models and not has_xp_col:
+        print("baseline_xp omitted: per_gw has no xp column")
+        models = [m for m in models if m != "baseline_xp"]
+
+    print("=== Replay caveats ===")
+    for line in replay_caveats():
+        print(f"  - {line}")
+    print()
+    print(
+        f"Season {args.season}: GWs {gws[0]}–{gws[-1]} (n={len(gws)}), "
+        f"models={','.join(models)}"
+    )
+    print(f"per_gw={bundle['per_gw_path']}")
+    print(f"fixtures={bundle['fixtures_path']}")
+    print()
+
+    per_model_gws = {m: [] for m in models}
+    per_gw_out = {}
+
+    for gw in gws:
+        players, history, ctx = build_replay_inputs(
+            per_gw, prior_by_pid, fixtures, gw, names=names
+        )
+        if len(players) < 15:
+            print(f"GW{gw}: only {len(players)} players, skipped")
             continue
 
-        ppm = build_ppm(
-            by_key,
-            code_of,
-            prior_by_code,
-            [(pid, etype, b["value"]) for pid, etype, b in pool],
-            gw,
-        )
+        actual = ctx["actual"]
+        minutes = ctx["minutes"]
+        gw_entry = {"n_players": len(players), "models": {}}
 
-        players = {}
-        ours_proj = {}
-        xp_proj = {}
-        actual = {}
-        xp_by_id = {}
-        for pid, etype, b in pool:
-            players[pid] = {
-                "id": pid,
-                "web_name": web_name_of.get(pid) or b["name"],
-                "team": b["team"],
-                "team_name": b["team"],
-                "element_type": etype,
-                "now_cost": b["value"],
-                "can_select": True,
+        for model in models:
+            if model == "baseline_xp" and not ctx["has_xp"]:
+                continue
+            packed = build_model_projections(
+                model, players, history, fixtures, gw, per_gw, ctx
+            )
+            eps = _proj_eps(packed)
+            xi_pts, xi_ids, _captain = pick_xi(packed, players, actual)
+            metrics = gw_metrics(
+                eps,
+                actual,
+                minutes=minutes,
+                played_only=True,
+                squad_ids=xi_ids,
+            )
+            row = {
+                "gw": gw,
+                "metrics": {k: metrics.get(k) for k in METRIC_KEYS},
+                "xi_points": xi_pts,
+                "n_played": sum(1 for m in minutes.values() if m > 0),
             }
-            prior = prior_by_code.get(code_of.get(pid))
-            form = rolling_totals(by_key, pid, gw)
-            ep, low = project_player(etype, prior, form, b["value"], b["was_home"], ppm)
-            ours_proj[pid] = {"ep": ep, "low_confidence": low}
-            xp_proj[pid] = {"ep": b["xp"], "low_confidence": False}
-            actual[pid] = b["points"]
-            xp_by_id[pid] = b["xp"]
+            per_model_gws[model].append(row)
+            gw_entry["models"][model] = {
+                "metrics": {k: _round_or_none(metrics.get(k)) for k in METRIC_KEYS},
+                "xi_points": _round_or_none(xi_pts, 2),
+            }
 
-        our_score, our_xi, our_cap = pick_optimal(ours_proj, players, actual)
-        tmpl_xi, tmpl_cap = template_xi(pool)
-        tmpl_score = score_xi(tmpl_xi, tmpl_cap, actual)
+        per_gw_out[str(gw)] = gw_entry
+        bits = []
+        for model in models:
+            rows = per_model_gws[model]
+            if rows and rows[-1]["gw"] == gw:
+                xi = rows[-1]["xi_points"]
+                mae = rows[-1]["metrics"]["mae"]
+                bits.append(
+                    f"{model} mae={mae:.2f} xi={xi:.1f}"
+                    if mae is not None and xi is not None
+                    else f"{model}=?"
+                )
+        print(f"GW{gw:2d}  " + "  |  ".join(bits))
 
-        xp_missing = max(b["xp"] for _, _, b in pool) <= 0
-        xp_score = None
-        xp_xi = xp_cap = None
-        if not xp_missing:
-            xp_score, xp_xi, xp_cap = pick_optimal(xp_proj, players, actual)
-
-        if gw == 2 and xp_xi is not None:
-            print_xi_audit(
-                "xP-benchmark XI (audit)",
-                gw,
-                xp_xi,
-                xp_cap,
-                players,
-                bundles,
-                actual,
-                xp_by_id,
-                xp_score,
-            )
-            print_xi_audit(
-                "Our XI (audit)",
-                gw,
-                our_xi,
-                our_cap,
-                players,
-                bundles,
-                actual,
-                xp_by_id,
-                our_score,
-            )
-
-        results.append((gw, our_score, tmpl_score, xp_score))
-        xp_txt = f"{xp_score:5.1f}" if xp_score is not None else "    —"
-        print(
-            f"GW{gw:2d}  ours {our_score:5.1f}  |  template {tmpl_score:5.1f}  |  xP {xp_txt}"
-        )
-
+    summaries = {m: summarize(rows) for m, rows in per_model_gws.items() if rows}
     print()
-    print(f"{'GW':<6} {'ours':>8} {'template':>10} {'xP-bench':>10}")
-    print("-" * 38)
-    for gw, ours, tmpl, xp in results:
-        xp_txt = f"{xp:10.1f}" if xp is not None else f"{'—':>10}"
-        print(f"{gw:<6} {ours:>8.1f} {tmpl:>10.1f} {xp_txt}")
-    print("-" * 38)
+    print_table(summaries, models)
 
-    def mean_col(lo, hi, idx):
-        vals = []
-        for gw, ours, tmpl, xp in results:
-            if not (lo <= gw <= hi):
-                continue
-            val = (ours, tmpl, xp)[idx]
-            if val is None:
-                continue
-            vals.append(val)
-        return (sum(vals) / len(vals) if vals else 0.0), len(vals)
-
-    def report(label, lo, hi):
-        o, n = mean_col(lo, hi, 0)
-        t, _ = mean_col(lo, hi, 1)
-        x, nx = mean_col(lo, hi, 2)
-        ours_on_xp = [
-            ours for gw, ours, tmpl, xp in results
-            if lo <= gw <= hi and xp is not None
-        ]
-        print(f"{label} (n={n}):  ours {o:.2f}  |  template {t:.2f}")
-        if nx:
-            print(
-                f"  xP-present (n={nx}): ours {sum(ours_on_xp)/len(ours_on_xp):.2f}  "
-                f"|  xP-bench {x:.2f}"
-            )
-
+    baselines_run = [m for m in models if m in BASELINE_MODELS and m in summaries]
     print()
-    report("Season avg GW2–38", 2, 38)
-    report("First half GW2–19", 2, 19)
-    report("Second half GW20–38", 20, 38)
+    print("=== Verdict (model vs baselines) ===")
+    for line in verdict_block(summaries, models, baselines_run):
+        print(line)
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = REPORTS_DIR / f"scoreboard_{args.season}.json"
+    scoreboard = {
+        "generated_at": git_commit_iso(),
+        "git_sha": git_short_sha(),
+        "season": args.season,
+        "gws": gws,
+        "models": models,
+        "caveats": replay_caveats(),
+        "per_model_summary": summaries,
+        "per_gw": per_gw_out,
+        "verdict": verdict_block(summaries, models, baselines_run),
+    }
+    out_path.write_text(
+        json.dumps(scoreboard, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(f"\nWrote {out_path}")
 
 
 if __name__ == "__main__":
